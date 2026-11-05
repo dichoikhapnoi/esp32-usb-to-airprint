@@ -129,13 +129,19 @@ function user(): string {
   return 'Web browser';
 }
 
-export function printJobRequest(jobName: string, format: string): Uint8Array {
-  return encodeRequest(OP.PRINT_JOB, [
-    ['printer-uri', { tag: TAG.URI, value: printerUri() }],
-    ['requesting-user-name', { tag: TAG.NAME, value: user() }],
-    ['job-name', { tag: TAG.NAME, value: jobName.slice(0, 60) }],
-    ['document-format', { tag: TAG.MIMETYPE, value: format }],
-  ]);
+export function printJobRequest(jobName: string, format: string, sides: 'one' | 'long' | 'short' = 'one'): Uint8Array {
+  const job: [string, Value][] =
+    sides === 'one' ? [] : [['sides', { tag: TAG.KEYWORD, value: sides === 'long' ? 'two-sided-long-edge' : 'two-sided-short-edge' }]];
+  return encodeRequest(
+    OP.PRINT_JOB,
+    [
+      ['printer-uri', { tag: TAG.URI, value: printerUri() }],
+      ['requesting-user-name', { tag: TAG.NAME, value: user() }],
+      ['job-name', { tag: TAG.NAME, value: jobName.slice(0, 60) }],
+      ['document-format', { tag: TAG.MIMETYPE, value: format }],
+    ],
+    job,
+  );
 }
 
 async function call(body: Uint8Array): Promise<IppResponse> {

@@ -5,7 +5,7 @@
 import { decodeResponse, printJobRequest, statusOk, statusText } from './ipp';
 import { paperPixels, place, type Fit, type Orientation, type PaperId } from './layout';
 import type { Source } from './source';
-import { UrfLineEncoder, urfFileHeader, urfPageHeader } from './urf';
+import { UrfLineEncoder, urfFileHeader, urfPageHeader, type Sides } from './urf';
 
 export interface PrintOptions {
   paper: PaperId;
@@ -15,6 +15,7 @@ export interface PrintOptions {
   copies: number;
   gray: boolean;
   dpi: 300 | 600;
+  sides: Sides; // one-sided, or two-sided (flip on the long / short edge)
 }
 
 const BAND_PIXELS = 2_500_000; // per band canvas
@@ -30,7 +31,7 @@ export async function renderJob(src: Source, o: PrintOptions, progress: Progress
   canvas.width = W;
   canvas.height = band;
   const ctx = canvas.getContext('2d', { willReadFrequently: true, alpha: false })!;
-  const header = urfPageHeader({ width: W, height: H, dpi: o.dpi, gray: o.gray });
+  const header = urfPageHeader({ width: W, height: H, dpi: o.dpi, gray: o.gray, sides: o.sides });
   const pages: Blob[] = [];
   let done = 0;
   for (const i of o.pages) {
@@ -61,7 +62,17 @@ export async function renderJob(src: Source, o: PrintOptions, progress: Progress
     done++;
   }
   canvas.width = canvas.height = 1;
-  const all: BlobPart[] = [urfFileHeader(o.pages.length * o.copies) as BlobPart];
+  // Two-sided: the pages go front, back, front, back... An odd count ends with a blank back, so that
+  // with several copies the next copy does not start on the back of this one.
+  if (o.sides !== 'one' && pages.length % 2 === 1) {
+    const enc = new UrfLineEncoder(W, o.gray);
+    const parts: BlobPart[] = [header as BlobPart];
+    enc.addWhite(H);
+    for (const c of enc.take()) parts.push(c as BlobPart);
+    for (const c of enc.finish()) parts.push(c as BlobPart);
+    pages.push(new Blob(parts));
+  }
+  const all: BlobPart[] = [urfFileHeader(pages.length * o.copies) as BlobPart];
   for (let c = 0; c < o.copies; c++) all.push(...pages);
   return new Blob(all);
 }
@@ -78,6 +89,7 @@ export function sendJob(
   name: string,
   upload: (fraction: number) => void,
   signal: AbortSignal,
+  sides: Sides = 'one',
 ): Promise<SendResult> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -98,6 +110,6 @@ export function sendJob(
     xhr.onerror = () => reject(new Error('the connection to the printer was lost'));
     xhr.onabort = () => reject(new DOMException('canceled', 'AbortError'));
     signal.addEventListener('abort', () => xhr.abort());
-    xhr.send(new Blob([printJobRequest(name, 'image/urf') as BlobPart, doc]));
+    xhr.send(new Blob([printJobRequest(name, 'image/urf', sides) as BlobPart, doc]));
   });
 }

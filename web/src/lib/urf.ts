@@ -6,11 +6,14 @@
 //   n > 128   257 - n literal pixels follow
 // Pixels are 3 bytes (sRGB) or 1 byte (gray).
 
+export type Sides = 'one' | 'long' | 'short'; // one-sided, two-sided long edge / short edge
+
 export interface UrfPage {
   width: number;
   height: number;
   dpi: number;
   gray: boolean;
+  sides?: Sides;
 }
 
 export function urfFileHeader(pages: number): Uint8Array {
@@ -25,7 +28,7 @@ export function urfPageHeader(p: UrfPage): Uint8Array {
   const v = new DataView(h.buffer);
   h[0] = p.gray ? 8 : 24; // bits per pixel
   h[1] = p.gray ? 0 : 1; // colour space: sGray / sRGB
-  h[2] = 1; // simplex
+  h[2] = p.sides === 'long' ? 2 : p.sides === 'short' ? 3 : 1; // duplex: 1 one-sided, 2 long edge, 3 short edge
   h[3] = 4; // normal quality
   v.setUint32(12, p.width);
   v.setUint32(16, p.height);

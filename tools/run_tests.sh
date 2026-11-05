@@ -18,6 +18,7 @@ OUT=$(cd $OUT && pwd)
 echo "== host unit tests"
 make -C host -s
 host/bjl_host selftest
+host/capt_host selftest | tail -2
 host/scan_host selftest 2>/dev/null | tail -1
 host/oled_host selftest
 

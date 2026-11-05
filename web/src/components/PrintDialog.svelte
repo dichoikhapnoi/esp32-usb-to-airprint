@@ -20,6 +20,7 @@
     type PaperId,
   } from '../lib/layout';
   import { renderJob, sendJob, type PrintOptions } from '../lib/print';
+  import type { Sides } from '../lib/urf';
   import { whiteCanvas, type Source } from '../lib/source';
   import { toast } from '../lib/ui.svelte';
 
@@ -44,6 +45,7 @@
   let fit = $state<Fit>(file.source === 'scan' && file.dpi ? 'actual' : 'fit'); // a scan: a 1:1 copy
   let gray = $state<boolean>(saved.gray ?? false);
   let dpi = $state<300 | 600>(saved.dpi || 600);
+  let sides = $state<Sides>(saved.sides || 'one');
   let pageIdx = $state(0);
   let previewEl: HTMLDivElement;
 
@@ -73,7 +75,7 @@
 
   $effect(() => {
     try {
-      localStorage.setItem('printSettings.v2', JSON.stringify({ paper, gray, dpi }));
+      localStorage.setItem('printSettings.v2', JSON.stringify({ paper, gray, dpi, sides }));
     } catch {
       /* private mode */
     }
@@ -112,7 +114,8 @@
 
   async function print() {
     if (!src || !selected?.length) return;
-    const o: PrintOptions = { paper, fit, orientation, pages: selected, copies, gray, dpi };
+    const twoSided: Sides = p?.duplex ? sides : 'one';
+    const o: PrintOptions = { paper, fit, orientation, pages: selected, copies, gray, dpi, sides: twoSided };
     abort = new AbortController();
     const signal = abort.signal;
     const sheets = selected.length * copies;
@@ -142,6 +145,7 @@
           }
         },
         signal,
+        twoSided,
       );
       toast(`Printed ${sheets} page${sheets === 1 ? '' : 's'} of ${name}`, 'ok');
       if (!closed) onclose();
@@ -246,6 +250,22 @@
             <button class:on={orientation === 'landscape'} onclick={() => (orientation = 'landscape')}>Landscape</button>
           </div>
         </div>
+        {#if p?.duplex}
+          <div class="field">
+            <span class="label">Sides</span>
+            <div class="seg">
+              <button class:on={sides === 'one'} onclick={() => (sides = 'one')}>One-sided</button>
+              <button class:on={sides === 'long'} onclick={() => (sides = 'long')}>Two-sided · long edge</button>
+              <button class:on={sides === 'short'} onclick={() => (sides = 'short')}>Two-sided · short edge</button>
+            </div>
+            {#if sides !== 'one'}
+              <span class="small muted">
+                {sides === 'long' ? 'Turn the sheet like a page of a book.' : 'Turn the sheet like a page of a notepad.'}
+                Odd pages are fronts, even pages are backs; an odd last page gets a blank back.
+              </span>
+            {/if}
+          </div>
+        {/if}
         <div class="field">
           <span class="label">Color</span>
           <div class="seg">

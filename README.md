@@ -38,9 +38,11 @@ Turns any USB-only printers into a wireless printer and scanner. An ESP32-S3 boa
 | 🟡 MP490, MP493, MP495 | MP490 to MP499 | yes |
 | 🟡 MX340, MX350 | MX340 to MX358 | yes (glass only) |
 | 🟡 MX360, MX410, MX420 | MX360 to MX428 | yes (glass only) |
+| 🟢 LBP3300 | LBP3300 (black and white laser, CAPT): A4, one- and two-sided | no scanner |
 
 - 🟢 Validated on real printer
 - 🟡 Expected to work, not tested on real hardware yet.
+- The LBP3300 speaks a different protocol (Canon CAPT), implemented from the open-source captdriver and from [thientranvan/esp32_printer_canon_3300](https://github.com/thientranvan/esp32_printer_canon_3300), which printed on this model. Its driver is GPLv3 (see License). Tested on a real printer: A4 on plain paper, one-sided and two-sided (long and short edge). Not tried: Letter, other paper sources, toner and paper status.
 
 The firmware recognises the printer when it is plugged in. Other printers? Please open an issue or a PR.
 
@@ -119,6 +121,6 @@ Each printer model is a driver in `components/printers/`, listed in `printers.c`
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE), except for the CAPT laser printer driver (`components/printers/canon_capt.c`, `capt.c`, `hiscoa.c`, `capt.h`, `hiscoa.h` and `host/capt_host.c`): it is ported from [captdriver](https://github.com/mounaiban/captdriver) (Copyright (C) 2013 Alexey Galakhov and contributors) and licensed under the GNU GPL version 3 or later, see [COPYING-GPL3](COPYING-GPL3). A firmware built with those files is distributed under the GPLv3; MIT code can be combined with it. Without them (remove `canon_capt.c`, `capt.c`, `hiscoa.c` and the `canon_lbp3300_driver` line in `printers.c`) the firmware is plain MIT.
 
 The printer and scanner protocols follow [Gutenprint](https://gimp-print.sourceforge.io/) and [SANE](http://www.sane-project.org/)'s pixma backend. The JPEG encoder's DCT is a translation of libjpeg's `jfdctint.c`: this software is based in part on the work of the Independent JPEG Group. The web UI bundles [Svelte](https://svelte.dev/) (MIT) and [pdf.js](https://mozilla.github.io/pdf.js/) (Apache-2.0).

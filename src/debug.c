@@ -25,6 +25,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "capt.h"
 #include "local_config.h"
 
 static const char *TAG = "debug";
@@ -550,6 +551,25 @@ static esp_err_t coredump_erase_post(httpd_req_t *req)
                      r == ESP_OK ? "core dump erased\n" : "erase failed\n");
 }
 
+// POST /capt?o=<byte offset>&v=<hex value>  or  /capt?clear=1: overrides a byte of the CAPT page parameters
+static esp_err_t capt_post(httpd_req_t *req)
+{
+    char q[64], a[16], b[16];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK)
+        return send_text(req, "400 Bad Request", "use ?o=<offset>&v=<hex> or ?clear=1\n");
+    if (httpd_query_key_value(q, "clear", a, sizeof(a)) == ESP_OK) {
+        canon_capt_set_override(0, -1);
+        ESP_LOGW(TAG, "CAPT page parameter overrides cleared");
+        return send_text(req, "200 OK", "cleared\n");
+    }
+    if (httpd_query_key_value(q, "o", a, sizeof(a)) != ESP_OK || httpd_query_key_value(q, "v", b, sizeof(b)) != ESP_OK)
+        return send_text(req, "400 Bad Request", "use ?o=<offset>&v=<hex> or ?clear=1\n");
+    int o = atoi(a), v = (int)strtol(b, NULL, 16);
+    canon_capt_set_override(o, v);
+    ESP_LOGW(TAG, "CAPT page parameter %d set to %02X for the next pages", o, v & 0xFF);
+    return send_text(req, "200 OK", "ok\n");
+}
+
 static esp_err_t loglevel_post(httpd_req_t *req)
 {
     char q[64], tag[32], level[16];
@@ -599,6 +619,7 @@ esp_err_t debug_server_start(bool (*busy)(void))
         {.uri = "/coredump/erase", .method = HTTP_POST, .handler = coredump_erase_post},
         {.uri = "/loglevel", .method = HTTP_POST, .handler = loglevel_post},
         {.uri = "/panic", .method = HTTP_POST, .handler = panic_post},
+        {.uri = "/capt", .method = HTTP_POST, .handler = capt_post},
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++)
         if (httpd_register_uri_handler(h, &uris[i]) != ESP_OK)

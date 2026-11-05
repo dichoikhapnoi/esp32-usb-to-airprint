@@ -753,8 +753,13 @@ static void add_printer_attrs(ipp_out_t *o, const conn_t *c, const filter_t *f)
         ipp_out_int(o, IPP_TAG_INTEGER, "queued-job-count", s_active ? 1 : 0);
     if (W("sides-default"))
         ipp_out_str(o, IPP_TAG_KEYWORD, "sides-default", "one-sided");
-    if (W("sides-supported"))
-        ipp_out_str(o, IPP_TAG_KEYWORD, "sides-supported", "one-sided");
+    if (W("sides-supported")) {
+        if (drv->duplex)
+            ipp_out_strs(o, IPP_TAG_KEYWORD, "sides-supported",
+                         (const char *[]){"one-sided", "two-sided-long-edge", "two-sided-short-edge", NULL});
+        else
+            ipp_out_str(o, IPP_TAG_KEYWORD, "sides-supported", "one-sided");
+    }
     if (W("uri-authentication-supported"))
         ipp_out_str(o, IPP_TAG_KEYWORD, "uri-authentication-supported", "none");
     if (W("uri-security-supported"))
@@ -917,6 +922,38 @@ static int pipe_sync(void *ctx, const char *what)
     return s_cfg->job_sync ? s_cfg->job_sync(s_cfg->ctx, what) : 0;
 }
 
+static int pipe_flush(void *ctx)
+{
+    pipe_t *p = ctx;
+    int64_t t0 = now_us();
+    int r = s_cfg->job_flush(s_cfg->ctx);
+    p->out_us += now_us() - t0;
+    return r;
+}
+
+static int pipe_read(void *ctx, uint8_t *buf, size_t max, uint32_t timeout_ms)
+{
+    pipe_t *p = ctx;
+    int64_t t0 = now_us();
+    int r = s_cfg->job_read(s_cfg->ctx, buf, max, timeout_ms);
+    p->out_us += now_us() - t0;
+    return r;
+}
+
+static int pipe_delay(void *ctx, uint32_t ms)
+{
+    pipe_t *p = ctx;
+    int64_t t0 = now_us();
+    int r = s_cfg->job_delay(s_cfg->ctx, ms);
+    p->out_us += now_us() - t0;
+    return r;
+}
+
+static uint8_t *pipe_buffer(void *ctx, size_t *size)
+{
+    return s_cfg->job_buffer(s_cfg->ctx, size);
+}
+
 static int pipe_page_begin(void *user, const raster_page_t *pg)
 {
     pipe_t *p = user;
@@ -930,7 +967,13 @@ static int pipe_page_begin(void *user, const raster_page_t *pg)
     }
     if (!p->drv_job) {
         int paper = printer_driver_paper_for(d, pg->height, pg->dpi);
-        p->io = (printer_io_t){.write = pipe_write, .sync = pipe_sync, .ctx = p};
+        p->io = (printer_io_t){.write = pipe_write,
+                               .sync = pipe_sync,
+                               .flush = s_cfg->job_flush ? pipe_flush : NULL,
+                               .read = s_cfg->job_read ? pipe_read : NULL,
+                               .delay = s_cfg->job_delay ? pipe_delay : NULL,
+                               .big_buffer = s_cfg->job_buffer ? pipe_buffer : NULL,
+                               .ctx = p};
         p->dpi = pg->dpi;
         LOGI("job %d: %s %d dpi, %s", p->job->id, d->papers[paper].name, pg->dpi, pg->bytes_pp == 3 ? "color" : "gray");
         p->drv_job = d->job_begin(d, &p->io, pg->dpi, paper);
@@ -945,7 +988,12 @@ static int pipe_page_begin(void *user, const raster_page_t *pg)
     }
     p->job->line = 0;
     p->job->height = pg->height;
-    return d->page_begin(p->drv_job, pg->width, pg->height, pg->bytes_pp) ? 4 : 0;
+    if (d->page_options)
+        d->page_options(p->drv_job, d->duplex ? pg->duplex : 0);
+    int64_t t0 = now_us();
+    int r = d->page_begin(p->drv_job, pg->width, pg->height, pg->bytes_pp) ? 4 : 0;
+    p->render_us += now_us() - t0;      // the printer's own page setup counts as output (out_us) too
+    return r;
 }
 
 static int pipe_line(void *user, int y, const uint8_t *px)
@@ -967,7 +1015,10 @@ static int pipe_line(void *user, int y, const uint8_t *px)
 static int pipe_page_end(void *user, const raster_page_t *pg)
 {
     pipe_t *p = user;
-    if (s_cfg->driver->page_end(p->drv_job))
+    int64_t t0 = now_us();
+    int r = s_cfg->driver->page_end(p->drv_job);
+    p->render_us += now_us() - t0;
+    if (r)
         return 4;
     pthread_mutex_lock(&s_lock);
     p->job->impressions++;
@@ -1405,6 +1456,7 @@ int airprint_status_json(void *ctx, char *buf, size_t n)
     STR(s_cfg->name);
     PUT(",\"model\":");
     STR(s_cfg->make_model);
+    PUT(",\"duplex\":%s", s_cfg->driver && s_cfg->driver->duplex ? "true" : "false");
     pthread_mutex_lock(&s_lock);
     expire_pending();
     int state = printer_state(&st);

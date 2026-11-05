@@ -50,6 +50,16 @@ esp_err_t usb_printer_flush(void);
 esp_err_t usb_printer_wait_response(const char *needle, uint32_t timeout_ms);
 void usb_printer_job_end(void);
 
+// For printers with a command/reply protocol (CAPT) instead of Canon's IVEC
+// XML: no back-channel polling, the driver reads the replies itself.
+// Set when a printer is plugged in (print_job_set_printer), before any job.
+void usb_printer_set_raw(bool raw);
+// One bulk IN read (up to 512 bytes, so buf must hold 512), waits up to
+// timeout_ms: > 0 bytes, 0 nothing came, < 0 printer gone or job cancelled.
+int usb_printer_read(uint8_t *buf, size_t max, uint32_t timeout_ms);
+// Sleeps ms; < 0 as soon as the job is cancelled or the printer is gone.
+int usb_printer_delay(uint32_t ms);
+
 // Abort a running job from any task: stops pending transfers and makes the
 // job's write/flush calls fail with ESP_ERR_INVALID_STATE.
 void usb_printer_cancel(void);

@@ -21,6 +21,7 @@ export interface Job {
 export interface PrinterState {
   name: string;
   model: string;
+  duplex?: boolean; // prints on both sides of the sheet
   connected: boolean;
   state: 'idle' | 'processing' | 'stopped';
   message: string;

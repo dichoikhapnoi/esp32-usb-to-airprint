@@ -39,10 +39,6 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 esp_err_t wifi_start(const char *hostname)
 {
-    if (strlen(WIFI_SSID) == 0) {
-        ESP_LOGE(TAG, "WIFI_SSID is empty: set it in .env and rebuild");
-        return ESP_ERR_INVALID_ARG;
-    }
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
@@ -62,13 +58,25 @@ esp_err_t wifi_start(const char *hostname)
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, NULL);
 
-    wifi_config_t cfg = {0};
-    strncpy((char *)cfg.sta.ssid, WIFI_SSID, sizeof(cfg.sta.ssid));
-    strncpy((char *)cfg.sta.password, WIFI_PASSWORD, sizeof(cfg.sta.password));
-    cfg.sta.threshold.authmode = strlen(WIFI_PASSWORD) ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
-    cfg.sta.pmf_cfg.capable = true;
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "mode");
-    ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &cfg), TAG, "config");
+    if (strlen(WIFI_SSID) == 0) {
+        // No network in .env: use the one the WiFi driver saved in flash the
+        // last time a build that had one ran (so an update built without the
+        // WiFi settings, e.g. on another computer, still joins the network).
+        wifi_config_t saved = {0};
+        if (esp_wifi_get_config(WIFI_IF_STA, &saved) != ESP_OK || saved.sta.ssid[0] == 0) {
+            ESP_LOGE(TAG, "WIFI_SSID is empty and no network is saved: set it in .env and rebuild");
+            return ESP_ERR_INVALID_ARG;
+        }
+        ESP_LOGW(TAG, "WIFI_SSID is empty: using the network saved in flash");
+    } else {
+        wifi_config_t cfg = {0};
+        strncpy((char *)cfg.sta.ssid, WIFI_SSID, sizeof(cfg.sta.ssid));
+        strncpy((char *)cfg.sta.password, WIFI_PASSWORD, sizeof(cfg.sta.password));
+        cfg.sta.threshold.authmode = strlen(WIFI_PASSWORD) ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+        cfg.sta.pmf_cfg.capable = true;
+        ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &cfg), TAG, "config");
+    }
     // no modem sleep: a sleeping station answers mDNS / IPP slowly
     esp_wifi_set_ps(WIFI_PS_NONE);
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "start");

@@ -169,6 +169,7 @@ int raster_decode(raster_read_fn read, void *ctx, const raster_cb_t *cb, void *u
                     .height = (int)be32(ph + 16),
                     .dpi = (int)be32(ph + 20),
                     .bytes_pp = ph[0] / 8,
+                    .duplex = ph[2] >= 2 && ph[2] <= 3 ? ph[2] - 1 : 0,    // URF: 1 one-sided, 2 long, 3 short
                 };
                 if ((ph[0] != 8 && ph[0] != 24) || pg.width <= 0 || pg.height <= 0 || pg.width > 20000 ||
                     pg.height > 30000) {
@@ -202,6 +203,7 @@ int raster_decode(raster_read_fn read, void *ctx, const raster_cb_t *cb, void *u
                 .height = (int)be32(ph + 376),
                 .dpi = (int)xres,
                 .bytes_pp = (int)bits_pp / 8,
+                .duplex = be32(ph + 272) ? (be32(ph + 368) ? 2 : 1) : 0,     // Duplex, Tumble
             };
             // supported: sgray_8 (colour space 18, 8 bpp), srgb_8 (19, 24 bpp)
             if (!((cspace == 18 && bits_pp == 8) || (cspace == 19 && bits_pp == 24)) || xres != yres) {

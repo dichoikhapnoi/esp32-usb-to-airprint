@@ -30,6 +30,18 @@ typedef struct {
     int (*sync)(void *ctx, const char *what);
     // optional: called every 64 lines of a test page (yield, log progress)
     void (*progress)(void *ctx, int line, int lines);
+    // --- for printers with a command/reply protocol (CAPT), all optional:
+    // send what was written and wait until the printer has accepted it; < 0 = gone
+    int (*flush)(void *ctx);
+    // one read from the printer's bulk IN endpoint, waits up to timeout_ms:
+    // > 0 bytes read (at most max, give it room for 512), 0 = nothing came,
+    // < 0 = the printer is gone or the job was cancelled
+    int (*read)(void *ctx, uint8_t *buf, size_t max, uint32_t timeout_ms);
+    // sleep ms; < 0 as soon as the job is cancelled or the printer gone
+    int (*delay)(void *ctx, uint32_t ms);
+    // optional: the large buffer of the job (several MB of PSRAM, valid until the job ends); *size = its
+    // size. NULL = none: the driver can only do what fits in its own memory.
+    uint8_t *(*big_buffer)(void *ctx, size_t *size);
     void *ctx;
 } printer_io_t;
 
@@ -47,6 +59,9 @@ typedef struct printer_driver {
     uint16_t usb_vid, usb_pid;  // the device's USB ids, 0 = unknown (matched by usb_mdl)
     bool color;                 // colour printing (else gray only)
     bool scanner;               // the device has a Canon pixma scanner (components/scanner)
+    bool duplex;                // two-sided printing: page_options is told which side a page is
+    bool raw_io;                // the driver reads the printer's replies itself (io->read): the USB layer
+                                // must not poll the back channel for Canon IVEC status
     int resolutions[PRINTER_MAX_RESOLUTIONS];   // dpi, ascending; the last is the default
     int nresolutions;
     const printer_paper_t *papers;              // the first is the default
@@ -60,6 +75,9 @@ typedef struct printer_driver {
     // A page whose source raster is src_w x src_h pixels at the job's dpi,
     // paper corner at (0, 0); bytes_pp 1 = gray, 3 = RGB. 0 = ok.
     int (*page_begin)(void *job, int src_w, int src_h, int bytes_pp);
+    // optional, called before page_begin: duplex 0 = one-sided, 1 = two-sided-long-edge, 2 = short-edge
+    // (from the page header). The pages of a two-sided document come in order front, back, front, ...
+    void (*page_options)(void *job, int duplex);
     // Source line y (in order); px NULL = a white line. 0 = ok.
     int (*page_line)(void *job, int y, const uint8_t *px);
     int (*page_end)(void *job);

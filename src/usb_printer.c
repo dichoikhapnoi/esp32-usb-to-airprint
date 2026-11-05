@@ -64,6 +64,10 @@ typedef struct {
     atomic_int out_inflight;            // OUT transfers submitted, not completed
     volatile bool in_inflight;
     bool in_stopped;                    // IN endpoint failed, stop polling
+    volatile bool raw_in;               // the driver reads the replies itself (CAPT): no IVEC polling
+    SemaphoreHandle_t raw_sem;          // given by in_cb when a raw read completed
+    volatile size_t raw_len;
+    volatile usb_transfer_status_t raw_status;
     TickType_t in_last;                 // when the last IN read completed
     volatile bool ctrl_done;
     SemaphoreHandle_t ctrl_sem;
@@ -108,7 +112,7 @@ static void out_cb(usb_transfer_t *xfer)
 
 static void in_submit(void)
 {
-    if (s_p.gone || !s_p.ep_in || s_p.in_inflight || s_p.in_stopped)
+    if (s_p.gone || !s_p.ep_in || s_p.in_inflight || s_p.in_stopped || s_p.raw_in)
         return;
     s_p.in->num_bytes = IN_XFER_SIZE;
     s_p.in_inflight = true;
@@ -182,6 +186,12 @@ static void in_cb(usb_transfer_t *xfer)
 {
     s_p.in_inflight = false;
     s_p.in_last = xTaskGetTickCount();
+    if (s_p.raw_in) {           // a usb_printer_read(): the bytes stay in the transfer's buffer
+        s_p.raw_status = xfer->status;
+        s_p.raw_len = xfer->status == USB_TRANSFER_STATUS_COMPLETED ? xfer->actual_num_bytes : 0;
+        xSemaphoreGive(s_p.raw_sem);
+        return;
+    }
     if (xfer->status == USB_TRANSFER_STATUS_COMPLETED && xfer->actual_num_bytes > 0) {
         size_t n = xfer->actual_num_bytes;
         if (s_p.msg_len + n >= MSG_BUF_SIZE) {
@@ -634,7 +644,9 @@ esp_err_t usb_printer_start(usb_printer_conn_cb_t cb)
     s_p.out_free = xQueueCreate(OUT_XFER_COUNT, sizeof(usb_transfer_t *));
     s_p.scan_out_sem = xSemaphoreCreateBinary();
     s_p.scan_in_sem = xSemaphoreCreateBinary();
-    if (!s_p.lock || !s_p.ctrl_mutex || !s_p.ctrl_sem || !s_p.out_free || !s_p.scan_out_sem || !s_p.scan_in_sem)
+    s_p.raw_sem = xSemaphoreCreateBinary();
+    if (!s_p.lock || !s_p.ctrl_mutex || !s_p.ctrl_sem || !s_p.out_free || !s_p.scan_out_sem || !s_p.scan_in_sem ||
+        !s_p.raw_sem)
         return ESP_ERR_NO_MEM;
 
     const usb_host_config_t host_cfg = {.skip_phy_setup = false, .intr_flags = ESP_INTR_FLAG_LEVEL1};
@@ -806,6 +818,76 @@ esp_err_t usb_printer_flush(void)
         }
     }
     return job_check();
+}
+
+void usb_printer_set_raw(bool raw)
+{
+    s_p.raw_in = raw;
+    // a back-channel poll already waiting for an IVEC reply would swallow the
+    // reply to the driver's first command: take it back
+    if (raw && s_p.in_inflight && !s_p.gone) {
+        ESP_LOGI(TAG, "raw back channel: cancelling the pending status read");
+        abort_endpoint(s_p.ep_in);
+    }
+}
+
+int usb_printer_read(uint8_t *buf, size_t max, uint32_t timeout_ms)
+{
+    if (!s_p.ep_in || !s_p.raw_in || max < IN_XFER_SIZE)
+        return -1;
+    // a cancelled poll may still be returning
+    for (int i = 0; i < 100 && s_p.in_inflight; i++)
+        vTaskDelay(pdMS_TO_TICKS(10));
+    if (s_p.in_inflight)
+        return -1;
+    xSemaphoreTake(s_p.raw_sem, 0);
+    TickType_t start = xTaskGetTickCount();
+    do {
+        if (job_check() != ESP_OK)
+            return -1;
+        s_p.raw_len = 0;
+        s_p.raw_status = USB_TRANSFER_STATUS_COMPLETED;
+        s_p.in->num_bytes = IN_XFER_SIZE;
+        s_p.in_inflight = true;
+        if (usb_host_transfer_submit(s_p.in) != ESP_OK) {
+            s_p.in_inflight = false;
+            return -1;
+        }
+        bool done = false;
+        while (!done) {
+            done = xSemaphoreTake(s_p.raw_sem, pdMS_TO_TICKS(100)) == pdTRUE;
+            if (!done && (job_check() != ESP_OK || xTaskGetTickCount() - start >= pdMS_TO_TICKS(timeout_ms)))
+                break;
+        }
+        if (!done) {            // nothing came, or the job was cancelled
+            abort_endpoint(s_p.ep_in);
+            for (int i = 0; i < 100 && s_p.in_inflight; i++)
+                vTaskDelay(pdMS_TO_TICKS(10));
+            xSemaphoreTake(s_p.raw_sem, 0);
+            return job_check() == ESP_OK ? 0 : -1;
+        }
+        if (s_p.raw_status != USB_TRANSFER_STATUS_COMPLETED) {
+            ESP_LOGW(TAG, "bulk IN read failed, status %d", s_p.raw_status);
+            return -1;
+        }
+        if (s_p.raw_len > 0) {
+            memcpy(buf, s_p.in->data_buffer, s_p.raw_len);
+            return (int)s_p.raw_len;
+        }
+        // a zero-length packet: read again
+    } while (xTaskGetTickCount() - start < pdMS_TO_TICKS(timeout_ms));
+    return 0;
+}
+
+int usb_printer_delay(uint32_t ms)
+{
+    TickType_t start = xTaskGetTickCount();
+    while (xTaskGetTickCount() - start < pdMS_TO_TICKS(ms)) {
+        if (job_check() != ESP_OK)
+            return -1;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return job_check() == ESP_OK ? 0 : -1;
 }
 
 esp_err_t usb_printer_wait_response(const char *needle, uint32_t timeout_ms)

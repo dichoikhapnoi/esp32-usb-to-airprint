@@ -51,6 +51,7 @@ bool print_job_set_printer(const usb_printer_info_t *info)
     else
         ESP_LOGW(TAG, "printer %04x:%04x \"%s\" is not a model the firmware knows: using the \"%s\" driver anyway",
                  info->vid, info->pid, info->product, print_job_driver()->id);
+    usb_printer_set_raw(print_job_driver()->raw_io);
     return print_job_driver() != before;
 }
 
@@ -105,6 +106,21 @@ static int test_sync(void *ctx, const char *what)
     return print_job_sync(what);
 }
 
+static int test_flush(void *ctx)
+{
+    return usb_printer_flush() == ESP_OK ? 0 : -1;
+}
+
+static int test_read(void *ctx, uint8_t *buf, size_t max, uint32_t timeout_ms)
+{
+    return usb_printer_read(buf, max, timeout_ms);
+}
+
+static int test_delay(void *ctx, uint32_t ms)
+{
+    return usb_printer_delay(ms);
+}
+
 static void test_progress(void *ctx, int line, int lines)
 {
     vTaskDelay(1);      // let the idle task run (task watchdog)
@@ -156,7 +172,13 @@ esp_err_t print_job_test_page(bool dry_run, int dpi, print_stats_t *stats)
     ESP_LOGI(TAG, "%s: %s test page at %d dpi, free heap %lu", dry_run ? "dry run" : "printing", d->id, dpi,
              (unsigned long)esp_get_free_heap_size());
     test_out_t out = {.dry_run = dry_run};
-    printer_io_t io = {.write = test_write, .sync = dry_run ? NULL : test_sync, .progress = test_progress, .ctx = &out};
+    printer_io_t io = {.write = test_write,
+                       .sync = dry_run ? NULL : test_sync,
+                       .progress = test_progress,
+                       .flush = dry_run ? NULL : test_flush,
+                       .read = dry_run ? NULL : test_read,
+                       .delay = dry_run ? NULL : test_delay,
+                       .ctx = &out};
     err = d->test_page(d, &io, dpi, label) == 0 ? ESP_OK : ESP_FAIL;
     if (!dry_run) {
         if (err != ESP_OK && usb_printer_connected())

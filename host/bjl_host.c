@@ -283,6 +283,8 @@ static int cmd_selftest(void)
     CHECK(printer_driver_find("canon-mg2500"), "canon-mg2500 driver");
     for (int k = 0; printer_drivers[k]; k++) {
         const printer_driver_t *d = printer_drivers[k];
+        if (d->raw_io)
+            continue;       // not a BJL printer: capt_host checks the CAPT driver
         CHECK(d->test_page && d->model, "%s: test page", d->id);
         for (int i = 0; d->test_page && d->model && i < d->nresolutions; i++) {
             int dpi = d->resolutions[i];
@@ -324,6 +326,9 @@ static int cmd_selftest(void)
             {0x04a9, 0x1234, "MFG:Canon;MDL:P200;", "canon-p200"},            // " series" optional
             {0x04a9, 0x1234, "MFG:Canon; MDL:mg2900 Series;", "canon-mg2900"},
             {0x04a9, 0x1234, "MFG:Canon;MDL:MG3600 series;", NULL},           // not supported
+            {0x04a9, 0x267e, "", "canon-lbp3300"},                            // CAPT laser, by USB id
+            {0x04a9, 0x1234, "MFG:Canon;MDL:LBP3300;CMD:CAPT;VER:2.1;CLS:PRINTER;DES:Canon LBP3300;",
+             "canon-lbp3300"},
             {0x03f0, 0x1234, "MFG:HP;MDL:iP2700 series;", NULL},              // another maker
             {0x04a9, 0x1234, "MFG:Canon;MDL:iP2700 series XL;", NULL},
             {0x04a9, 0x1234, "", NULL},

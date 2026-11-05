@@ -117,10 +117,49 @@ static int job_sync(void *ctx, const char *what)
     return print_job_sync(what);
 }
 
+// The job's big buffer for two-sided printing (the held front side): the shared PSRAM buffer, taken
+// when a driver first asks and given back when the job ends. NULL while a scan has it.
+static uint8_t *s_job_big;
+static size_t s_job_big_size;
+static bool s_job_big_taken;
+
+static uint8_t *job_buffer(void *ctx, size_t *size)
+{
+    if (!s_job_big_taken) {
+        s_job_big_taken = true;
+        s_job_big = sbuf_acquire(SBUF_PRINT, &s_job_big_size);
+        ESP_LOGI(TAG, "two-sided printing: %u KB buffer%s", (unsigned)(s_job_big_size / 1024), s_job_big ? "" : " (busy)");
+    }
+    if (!s_job_big)
+        return NULL;
+    *size = s_job_big_size;
+    return s_job_big;
+}
+
+// for command/reply printers (CAPT)
+static int job_flush(void *ctx)
+{
+    return usb_printer_flush() == ESP_OK ? 0 : -1;
+}
+
+static int job_read(void *ctx, uint8_t *buf, size_t max, uint32_t timeout_ms)
+{
+    return usb_printer_read(buf, max, timeout_ms);
+}
+
+static int job_delay(void *ctx, uint32_t ms)
+{
+    return usb_printer_delay(ms);
+}
+
 static void job_close(void *ctx, bool ok)
 {
     usb_printer_job_end();      // sends the job's last bytes: a cancel may still need the timer
     esp_timer_stop(s_cancel_timer);
+    if (s_job_big)
+        sbuf_release(SBUF_PRINT, 0);
+    s_job_big = NULL;
+    s_job_big_taken = false;
     s_job_running = false;
     if (!ok && usb_printer_connected()) {
         ESP_LOGW(TAG, "job failed, resetting printer");
@@ -460,6 +499,10 @@ esp_err_t airprint_esp_start(const char *hostname, void (*on_job_state)(bool pri
         .job_open = job_open,
         .job_write = job_write,
         .job_sync = job_sync,
+        .job_flush = job_flush,
+        .job_read = job_read,
+        .job_delay = job_delay,
+        .job_buffer = job_buffer,
         .job_close = job_close,
         .job_cancel = job_cancel,
         .job_state = job_state,
@@ -483,6 +526,10 @@ esp_err_t airprint_esp_start(const char *hostname, void (*on_job_state)(bool pri
         s_cfg.job_open = dev_job_open;
         s_cfg.job_write = dev_job_write;
         s_cfg.job_sync = dev_job_sync;
+        s_cfg.job_flush = NULL;         // no printer behind the fake one
+        s_cfg.job_read = NULL;
+        s_cfg.job_delay = NULL;
+        s_cfg.job_buffer = NULL;
         s_cfg.job_close = dev_job_close;
         s_cfg.job_cancel = NULL;
         s_cfg.http_handler = dev_http;
