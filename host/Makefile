@@ -3,27 +3,33 @@ CFLAGS ?= -O2 -g -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefine
 # same float evaluation as the firmware build, so the test page CRC matches
 CFLAGS += -ffp-contract=off
 BJL = ../components/canon_bjl/canon_bjl.c ../components/canon_bjl/testpage.c ../components/canon_bjl/bjl_render.c
+CAPT = ../components/canon_capt/canon_capt.c ../components/canon_capt/hiscoa.c ../components/canon_capt/capt_fake.c
 AIRPRINT = ../components/airprint/airprint.c ../components/airprint/ipp.c ../components/airprint/raster.c \
            ../components/airprint/events.c ../components/airprint/printer_driver.c
-PRINTERS = ../components/printers/printers.c ../components/printers/canon_pixma.c
+PRINTERS = ../components/printers/printers.c ../components/printers/canon_pixma.c ../components/printers/canon_lbp3000.c
 WEBUI = ../components/webui/webui.c ../components/webui/web_assets.c
 SCAN_CORE = ../components/scanner/pixma_scan.c ../components/scanner/jpeg_enc.c ../components/scanner/fake_scanner.c
 SCANNER = $(SCAN_CORE) ../components/scanner/shared_buf.c ../components/scanner/scan_service.c
 OLED = ../components/oled/oled_ui.c
-INC = -I../components/canon_bjl/include -I../components/airprint/include -I../components/airprint \
-      -I../components/scanner/include -I../components/scanner -I../components/webui/include \
-      -I../components/oled/include
+INC = -I../components/canon_bjl/include -I../components/canon_capt/include -I../components/airprint/include \
+      -I../components/airprint -I../components/scanner/include -I../components/scanner \
+      -I../components/webui/include -I../components/oled/include
 
-all: bjl_host airprint_host scan_host oled_host
+all: bjl_host airprint_host scan_host oled_host capt_host
 
 bjl_host: bjl_host.c $(BJL) $(PRINTERS) ../components/airprint/printer_driver.c ../components/canon_bjl/include/*.h \
           ../components/airprint/include/printer_driver.h
-	$(CC) $(CFLAGS) $(INC) bjl_host.c $(BJL) $(PRINTERS) ../components/airprint/printer_driver.c -lm -o $@
+	$(CC) $(CFLAGS) $(INC) bjl_host.c $(BJL) $(CAPT) $(PRINTERS) ../components/airprint/printer_driver.c -lm -o $@
 
-airprint_host: airprint_host.c $(BJL) $(AIRPRINT) $(PRINTERS) $(SCANNER) $(WEBUI) $(OLED) ../components/airprint/include/*.h \
+airprint_host: airprint_host.c $(BJL) $(CAPT) $(AIRPRINT) $(PRINTERS) $(SCANNER) $(WEBUI) $(OLED) ../components/airprint/include/*.h \
                ../components/airprint/*.h ../components/scanner/include/*.h ../components/webui/include/*.h \
                ../components/oled/include/*.h
-	$(CC) $(CFLAGS) $(INC) airprint_host.c $(BJL) $(AIRPRINT) $(PRINTERS) $(SCANNER) $(WEBUI) $(OLED) -lm -lpthread -o $@
+	$(CC) $(CFLAGS) $(INC) airprint_host.c $(BJL) $(CAPT) $(AIRPRINT) $(PRINTERS) $(SCANNER) $(WEBUI) $(OLED) -lm -lpthread -o $@
+
+capt_host: capt_host.c $(CAPT) ../components/printers/canon_lbp3000.c ../components/airprint/printer_driver.c \
+           ../components/canon_capt/include/*.h ../components/airprint/include/printer_driver.h
+	$(CC) $(CFLAGS) $(INC) capt_host.c $(CAPT) ../components/printers/canon_lbp3000.c \
+	      ../components/airprint/printer_driver.c -lm -o $@
 
 # the web UI (web/), built and packed when its sources changed
 ../components/webui/web_assets.c: FORCE
@@ -39,4 +45,4 @@ oled_host: oled_host.c $(OLED) ../components/oled/include/*.h ../components/airp
 	$(CC) $(CFLAGS) $(INC) oled_host.c $(OLED) -o $@
 
 clean:
-	rm -rf bjl_host airprint_host scan_host oled_host out *.prn *.png *.raw
+	rm -rf bjl_host airprint_host scan_host oled_host capt_host out *.prn *.png *.raw

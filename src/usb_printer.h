@@ -48,6 +48,18 @@ esp_err_t usb_printer_flush(void);
 // ESP_OK = found, ESP_ERR_TIMEOUT = not seen in time, ESP_ERR_NOT_SUPPORTED =
 // the printer has no bulk IN endpoint.
 esp_err_t usb_printer_wait_response(const char *needle, uint32_t timeout_ms);
+
+// For binary request/response printer protocols (Canon CAPT): while raw I/O
+// is on, the back channel's automatic status polling (and its text
+// reassembly) is suspended, and usb_printer_raw_read() reads bulk IN data
+// directly. Call before such a job's first command, off again at job_end
+// (usb_printer_job_end also turns it off). No effect on a unidirectional
+// printer (no bulk IN endpoint).
+void usb_printer_set_raw_io(bool on);
+// One bulk IN transfer of up to len bytes while raw I/O is on. Bytes read
+// (0 = zero-length packet), USB_SCAN_TIMEOUT or USB_SCAN_ERROR.
+int usb_printer_raw_read(uint8_t *buf, size_t len, uint32_t timeout_ms);
+
 void usb_printer_job_end(void);
 
 // Abort a running job from any task: stops pending transfers and makes the

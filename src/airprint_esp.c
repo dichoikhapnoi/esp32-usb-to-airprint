@@ -6,6 +6,7 @@
 
 #include "airprint.h"
 #include "canon_bjl.h"
+#include "capt_fake.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -117,6 +118,20 @@ static int job_sync(void *ctx, const char *what)
     return print_job_sync(what);
 }
 
+// Binary request/response protocols (Canon CAPT): the driver turns raw I/O
+// on itself (usb_printer_set_raw_io) before using this.
+static int job_read(void *ctx, uint8_t *buf, size_t len, uint32_t timeout_ms)
+{
+    if (usb_printer_flush() != ESP_OK)
+        return -1;
+    return usb_printer_raw_read(buf, len, timeout_ms);
+}
+
+static void job_set_raw_io(void *ctx, bool on)
+{
+    usb_printer_set_raw_io(on);
+}
+
 static void job_close(void *ctx, bool ok)
 {
     usb_printer_job_end();      // sends the job's last bytes: a cancel may still need the timer
@@ -172,6 +187,8 @@ static void dev_get_status(void *ctx, airprint_status_t *st)
     st->supply[1].level = 30;
 }
 
+static capt_fake_t s_capt_fake;      // MODE=dev's stand-in for a CAPT printer's back channel
+
 static int dev_job_open(void *ctx)
 {
     if (s_job_running || s_dev_scanning)
@@ -182,6 +199,7 @@ static int dev_job_open(void *ctx)
     s_dev_crc = 0;
     s_dev_t0 = esp_timer_get_time();
     s_job_running = true;
+    capt_fake_init(&s_capt_fake);
     if (s_cap)
         ESP_LOGI(TAG, "dev job started (capture buffer %u KB)", (unsigned)(s_cap_size / 1024));
     else
@@ -199,7 +217,19 @@ static int dev_job_write(void *ctx, const uint8_t *data, size_t len)
         s_cap_truncated = true;
         s_cap_len += s_cap ? 0 : len;
     }
+    capt_fake_feed(&s_capt_fake, data, len);    // a CAPT driver's "printer", in case one is attached
     return 0;
+}
+
+// MODE=dev's binary back channel, for a CAPT-matched driver (see job_read):
+// no real printer, so a fake one answers just enough to let the job finish.
+static int dev_job_read(void *ctx, uint8_t *buf, size_t len, uint32_t timeout_ms)
+{
+    return (int)capt_fake_read(&s_capt_fake, buf, len);
+}
+
+static void dev_job_set_raw_io(void *ctx, bool on)
+{
 }
 
 static int dev_job_sync(void *ctx, const char *what)
@@ -460,6 +490,8 @@ esp_err_t airprint_esp_start(const char *hostname, void (*on_job_state)(bool pri
         .job_open = job_open,
         .job_write = job_write,
         .job_sync = job_sync,
+        .job_read = job_read,
+        .job_set_raw_io = job_set_raw_io,
         .job_close = job_close,
         .job_cancel = job_cancel,
         .job_state = job_state,
@@ -483,6 +515,8 @@ esp_err_t airprint_esp_start(const char *hostname, void (*on_job_state)(bool pri
         s_cfg.job_open = dev_job_open;
         s_cfg.job_write = dev_job_write;
         s_cfg.job_sync = dev_job_sync;
+        s_cfg.job_read = dev_job_read;
+        s_cfg.job_set_raw_io = dev_job_set_raw_io;
         s_cfg.job_close = dev_job_close;
         s_cfg.job_cancel = NULL;
         s_cfg.http_handler = dev_http;

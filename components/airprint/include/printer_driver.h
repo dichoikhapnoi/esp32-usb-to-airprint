@@ -28,6 +28,16 @@ typedef struct {
     // Canon's "StartJob"); < 0 = the printer is gone. Drivers carry on
     // without a reply.
     int (*sync)(void *ctx, const char *what);
+    // optional: flush, then read up to len raw bytes from the back channel
+    // (binary request/response protocols, e.g. Canon CAPT). NULL where the
+    // platform has no raw read (dry runs, "dev" mode without a fake
+    // responder): such a driver must fail its job rather than call this.
+    // Returns bytes read (0 at EOF/disconnect), < 0 on timeout or error.
+    int (*read)(void *ctx, uint8_t *buf, size_t len, uint32_t timeout_ms);
+    // optional: turns the platform's raw binary I/O mode on/off around a
+    // `read`-using job (on while the job runs, off at job_end); a driver
+    // that needs `read` but gets a NULL `set_raw_io` must also fail its job.
+    void (*set_raw_io)(void *ctx, bool on);
     // optional: called every 64 lines of a test page (yield, log progress)
     void (*progress)(void *ctx, int line, int lines);
     void *ctx;

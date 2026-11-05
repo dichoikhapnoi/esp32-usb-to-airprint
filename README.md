@@ -38,9 +38,11 @@ Turns any USB-only printers into a wireless printer and scanner. An ESP32-S3 boa
 | 🟡 MP490, MP493, MP495 | MP490 to MP499 | yes |
 | 🟡 MX340, MX350 | MX340 to MX358 | yes (glass only) |
 | 🟡 MX360, MX410, MX420 | MX360 to MX428 | yes (glass only) |
+| 🔶 LBP3000 | LBP3300 | no scanner (laser) |
 
 - 🟢 Validated on real printer
-- 🟡 Expected to work, not tested on real hardware yet.
+- 🟡 Expected to work, not tested on real hardware yet: a Canon PIXMA using the BJL/IVEC protocol like every other model above, just an untested model/variant.
+- 🔶 Different protocol, higher risk: the LBP3300 is a USB laser printer using Canon CAPT, not BJL/IVEC. Its driver (`canon_lbp3000.c`) was written from the published CAPT wire format with no LBP3300 to test against — the IEEE-1284 model string it matches on, the page margins, and the HiSCoA raster compression are all unverified. Expect to need serial-log debugging (`usb_mdl` in the driver, the firmware's "IEEE 1284 ID:" boot line) and iteration on real hardware before it prints correctly, if at all.
 
 The firmware recognises the printer when it is plugged in. Other printers? Please open an issue or a PR.
 

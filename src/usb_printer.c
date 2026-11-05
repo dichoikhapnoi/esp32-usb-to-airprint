@@ -69,6 +69,13 @@ typedef struct {
     SemaphoreHandle_t ctrl_sem;
     SemaphoreHandle_t ctrl_mutex;
 
+    // raw I/O (Canon CAPT-style binary request/response): while on, in_cb
+    // just signals raw_in_sem instead of doing text reassembly, and the
+    // automatic back-channel poll is suspended, so usb_printer_raw_read()
+    // alone drives s_p.in.
+    volatile bool raw_io;
+    SemaphoreHandle_t raw_in_sem;
+
     // scanner interface
     uint8_t scan_intf, scan_ep_out, scan_ep_in;
     uint16_t scan_mps;                  // bulk IN max packet size: reads are multiples of it
@@ -108,7 +115,7 @@ static void out_cb(usb_transfer_t *xfer)
 
 static void in_submit(void)
 {
-    if (s_p.gone || !s_p.ep_in || s_p.in_inflight || s_p.in_stopped)
+    if (s_p.gone || !s_p.ep_in || s_p.in_inflight || s_p.in_stopped || s_p.raw_io)
         return;
     s_p.in->num_bytes = IN_XFER_SIZE;
     s_p.in_inflight = true;
@@ -182,6 +189,13 @@ static void in_cb(usb_transfer_t *xfer)
 {
     s_p.in_inflight = false;
     s_p.in_last = xTaskGetTickCount();
+    // Raw I/O (Canon CAPT-style): usb_printer_raw_read() owns this transfer,
+    // no text reassembly. Checked here, not by swapping xfer->callback, so
+    // there is no race between the two tasks over which callback is bound.
+    if (s_p.raw_io) {
+        xSemaphoreGive(s_p.raw_in_sem);
+        return;
+    }
     if (xfer->status == USB_TRANSFER_STATUS_COMPLETED && xfer->actual_num_bytes > 0) {
         size_t n = xfer->actual_num_bytes;
         if (s_p.msg_len + n >= MSG_BUF_SIZE) {
@@ -634,7 +648,9 @@ esp_err_t usb_printer_start(usb_printer_conn_cb_t cb)
     s_p.out_free = xQueueCreate(OUT_XFER_COUNT, sizeof(usb_transfer_t *));
     s_p.scan_out_sem = xSemaphoreCreateBinary();
     s_p.scan_in_sem = xSemaphoreCreateBinary();
-    if (!s_p.lock || !s_p.ctrl_mutex || !s_p.ctrl_sem || !s_p.out_free || !s_p.scan_out_sem || !s_p.scan_in_sem)
+    s_p.raw_in_sem = xSemaphoreCreateBinary();
+    if (!s_p.lock || !s_p.ctrl_mutex || !s_p.ctrl_sem || !s_p.out_free || !s_p.scan_out_sem || !s_p.scan_in_sem ||
+        !s_p.raw_in_sem)
         return ESP_ERR_NO_MEM;
 
     const usb_host_config_t host_cfg = {.skip_phy_setup = false, .intr_flags = ESP_INTR_FLAG_LEVEL1};
@@ -825,8 +841,65 @@ esp_err_t usb_printer_wait_response(const char *needle, uint32_t timeout_ms)
     return ESP_ERR_TIMEOUT;
 }
 
+void usb_printer_set_raw_io(bool on)
+{
+    if (!s_p.ep_in)
+        return;
+    if (on) {
+        xSemaphoreTake(s_p.raw_in_sem, 0);     // drop a stale signal, if any
+        s_p.raw_io = true;
+        return;
+    }
+    s_p.raw_io = false;
+    // a raw read the caller gave up on (usb_printer_raw_read's own abort
+    // already failed) may still be in flight: give it a bounded moment to
+    // land as a dropped signal before the text back channel reuses s_p.in.
+    // If it never does (s_p.in_stopped: the same "wedged" state the
+    // scanner's scan_stuck already tolerates), carry on regardless.
+    for (int i = 0; s_p.in_inflight && !s_p.in_stopped && i < 200; i++)
+        vTaskDelay(pdMS_TO_TICKS(5));
+}
+
+// One bulk IN transfer, synchronous. Mirrors scan_xfer() but on the printer
+// interface's s_p.in, gated by raw_io so it never races the IVEC-style poll.
+int usb_printer_raw_read(uint8_t *buf, size_t len, uint32_t timeout_ms)
+{
+    if (!s_p.raw_io || !s_p.in || s_p.gone || s_p.cancel)
+        return USB_SCAN_ERROR;
+    if (len > IN_XFER_SIZE)
+        len = IN_XFER_SIZE;
+    xSemaphoreTake(s_p.raw_in_sem, 0);
+    s_p.in->num_bytes = (int)len;
+    s_p.in_inflight = true;
+    if (usb_host_transfer_submit(s_p.in) != ESP_OK) {
+        s_p.in_inflight = false;
+        return USB_SCAN_ERROR;
+    }
+    bool timed_out = xSemaphoreTake(s_p.raw_in_sem, pdMS_TO_TICKS(timeout_ms)) != pdTRUE;
+    if (timed_out) {
+        abort_endpoint(s_p.ep_in);
+        if (xSemaphoreTake(s_p.raw_in_sem, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            ESP_LOGE(TAG, "raw IN transfer did not come back");
+            s_p.in_stopped = true;
+            return USB_SCAN_ERROR;
+        }
+    }
+    if (s_p.in->status == USB_TRANSFER_STATUS_COMPLETED) {
+        int n = s_p.in->actual_num_bytes;
+        if (n > 0)
+            memcpy(buf, s_p.in->data_buffer, (size_t)n);
+        return n;
+    }
+    if (timed_out)
+        return USB_SCAN_TIMEOUT;
+    ESP_LOGW(TAG, "raw IN transfer failed, status %d", s_p.in->status);
+    return USB_SCAN_ERROR;
+}
+
 void usb_printer_job_end(void)
 {
+    if (s_p.raw_io)
+        usb_printer_set_raw_io(false);
     // the job's last bytes (end of page, end of job) are still in the
     // transfer being filled unless the driver synced at the end: send them.
     // Not after a cancel or a failed transfer (job_check stops the flush).
