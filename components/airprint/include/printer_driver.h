@@ -53,12 +53,11 @@ typedef struct {
 
 typedef struct printer_driver {
     const char *id;             // CONFIG_PRINTER_DRIVER value, e.g. "canon-mg2500"
-    const char *make_model;     // IPP / mDNS / eSCL, "Canon MG2500 series"
+    const char *make_model;     // IPP / mDNS, "Canon MG2500 series"
     const char *usb_mfg;        // IEEE 1284 MFG and MDL: the mDNS record, and how
     const char *usb_mdl;        // printer_driver_match recognises the device
     uint16_t usb_vid, usb_pid;  // the device's USB ids, 0 = unknown (matched by usb_mdl)
     bool color;                 // colour printing (else gray only)
-    bool scanner;               // the device has a Canon pixma scanner (components/scanner)
     bool duplex;                // two-sided printing: page_options is told which side a page is
     bool raw_io;                // the driver reads the printer's replies itself (io->read): the USB layer
                                 // must not poll the back channel for Canon IVEC status

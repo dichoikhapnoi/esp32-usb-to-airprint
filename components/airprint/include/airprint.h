@@ -58,7 +58,7 @@ typedef struct {
     void (*job_cancel)(void *ctx);              // asynchronous cancel of the running job
     void (*job_state)(void *ctx, bool printing);    // e.g. LED
     void (*identify)(void *ctx);                // Identify-Printer (blink LED)
-    // Extra HTTP resources (scanner, debug downloads). Called for GET/HEAD/
+    // Extra HTTP resources (web UI, debug downloads). Called for GET/HEAD/
     // DELETE requests and for POSTs outside /ipp; path includes the query string.
     // Return true once a response was sent with the airprint_http_* calls
     // below, false for a 404. Runs on the connection's thread.

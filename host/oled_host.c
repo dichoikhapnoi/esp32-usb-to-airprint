@@ -86,11 +86,6 @@ static oled_state_t base(void)
     s.print.state = 3;
     s.print.job.percent = -1;
     s.print.job.ended_ago = -1;
-    s.scan.scanner = true;
-    s.scan.state = "idle";
-    s.scan.source = "";
-    s.scan.paper = "a4";
-    s.scan.ended_ago = -1;
     return s;
 }
 
@@ -148,37 +143,6 @@ static void render(const char *dir)
     s = base();
     s.print.status.busy = true;
     sc[n++] = (scenario_t){"test-page", s};
-
-    s = base();
-    s.scan.state = "scanning";
-    s.scan.source = "button";
-    s.scan.dpi = 150;
-    s.scan.height = 1754;
-    sc[n++] = (scenario_t){"scan-warmup", s};
-
-    s = base();
-    s.scan.state = "scanning";
-    s.scan.source = "escl";
-    s.scan.paper = "custom";
-    s.scan.dpi = 300;
-    s.scan.lines = 1000;
-    s.scan.height = 3508;
-    sc[n++] = (scenario_t){"scanning", s};
-
-    s = base();
-    s.scan.state = "done";
-    s.scan.source = "button";
-    s.scan.dpi = 150;
-    s.scan.bytes = 403456;
-    s.scan.ended_ago = 2;
-    sc[n++] = (scenario_t){"scanned", s};
-
-    s = base();
-    s.scan.state = "failed";
-    s.scan.dpi = 600;
-    strcpy(s.scan.error, "the scanner did not answer (timeout)");
-    s.scan.ended_ago = 2;
-    sc[n++] = (scenario_t){"scan-failed", s};
 
     s = base();
     s.wifi_configured = false;

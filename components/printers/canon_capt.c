@@ -49,6 +49,8 @@ static const char *TAG = "canon_capt";
 #define DECODE_MAX_S 60         // waits (seconds) for the printer to decode a page
 #define PRINT_MAX_S 300         // ... to finish printing
 #define BUFFER_MAX_S 120        // ... for room in its buffer
+#define STALE_JOB_MAX 24        // job ids tried when the printer refuses a new job
+#define PAPER_MAX_S 300         // waits (seconds) for somebody to load paper; the other waits stand still meanwhile
 #define SOURCE_CASSETTE_1 1
 #define MEDIA_PLAIN 1
 #define FLAG_FRONT 0x02         // byte 5 of the page parameters: the front / back side of a two-sided sheet
@@ -61,6 +63,17 @@ static const char *TAG = "canon_capt";
 #define BACK_ROTATE_LONG 1
 #define BACK_ROTATE_SHORT 0
 
+// Where the printer really puts the image of a two-sided sheet (measured on the printer 2026-11-12 and 2026-11-18
+// with vertical lines 30 mm from each edge, 300 and 600 dpi alike): the front lands 8 mm too far left, the back
+// within 1 mm of its place. The window's left margin moves the image on the paper by exactly as much, so the
+// front's window starts further right while still showing the same page columns (set_window). Moving the columns
+// along with the window cancels the shift: margins 120, 220 and 320 done that way all printed at the same place.
+// In 600 dpi pixels, positive = the window moves right in the printer's own coordinates (a long-edge back is seen
+// mirrored after the turn). A one-sided page is not shifted. Debug overrides 43 (front) and 44 (back): signed
+// bytes in units of 4 px.
+#define FRONT_SHIFT_PX 188
+#define BACK_SHIFT_PX 0
+
 typedef struct {
     printer_io_t io;
     capt_t c;
@@ -72,6 +85,9 @@ typedef struct {
     unsigned line_bytes;        // bytes of an image line
     unsigned lines;             // lines of the image
     unsigned x0;                // first source pixel of the image
+    unsigned left;              // where the image window of the page being sent starts (600 dpi px)
+    unsigned nominal_bytes;     // the window's full width in bytes (buffers are made for it)
+    unsigned held_left, held_bytes;     // the window of the held front
     unsigned paper_sz;          // the page size byte of the page parameters
 
     // two-sided printing
@@ -88,6 +104,10 @@ typedef struct {
     int err;                    // first failure, nonzero stops everything
     int pages;                  // pages (sides) sent to the printer in this job
     int sheets;                 // sheets among them: the printer counts a two-sided sheet once, at its front
+    bool paper_gave_up;         // the wait for paper ran out
+    int paper_ticks;
+    int pg_base;                // pages / sheets sent before the printer's counters were last restarted
+    int sheet_base;
     uint8_t cur_flag;           // the flag of the page being sent
     int src_w, src_h, bpp;
     unsigned abs_row;           // rows (600 dpi) of the page seen so far
@@ -178,24 +198,33 @@ static void render_window(const capt_job_t *j, const uint8_t *px, unsigned srow,
     }
 }
 
-// One image row turned by 180 degrees. Turning the whole page maps the image window onto the
-// page area from MARGIN_PX to the opposite edge: bits 0 .. r-1 of the new row are the first r bits
-// of the old one in reverse order (r = the page width less both margins), the rest is white.
+// One image row turned by 180 degrees: the whole row reversed. The raw back is rendered from the page
+// columns that the turned window covers (set_window), so nothing is cut or padded here.
 static void rotate_row(const capt_job_t *j, const uint8_t *src, uint8_t *dst)
 {
-    const unsigned r = j->page_w - 2 * MARGIN_PX;
-    memset(dst, 0, j->line_bytes);
-    if (r % 8 == 0) {
-        const unsigned nb = r / 8;
-        for (unsigned i = 0; i < nb; i++)
-            dst[i] = s_rev[src[nb - 1 - i]];
-    } else {
-        for (unsigned i = 0; i < r; i++) {
-            unsigned from = r - 1 - i;
-            if (src[from / 8] & (0x80u >> (from % 8)))
-                dst[i / 8] |= (uint8_t)(0x80u >> (i % 8));
-        }
-    }
+    const unsigned nb = j->line_bytes;
+    for (unsigned i = 0; i < nb; i++)
+        dst[i] = s_rev[src[nb - 1 - i]];
+}
+
+// The image window of a page: it starts `shift` px (600 dpi) right of the nominal margin and is as wide as
+// fits on the page (the printer is not given a window that ends within 8 px of the page's edge). The page
+// columns it shows start at the nominal margin whatever the shift, which is what moves the image on the paper;
+// a narrower window loses columns at the right. A turned back (turned) is rendered from the columns that end
+// at the nominal margin of the far side, so the same holds after the turn.
+static void set_window(capt_job_t *j, int shift, bool turned)
+{
+    if (shift < -100)
+        shift = -100;
+    if (shift > 400)
+        shift = 400;
+    const unsigned left = (unsigned)((int)MARGIN_PX + shift);
+    unsigned wb = j->nominal_bytes;
+    if (left + wb * 8 > j->page_w - 8)
+        wb = (j->page_w - 8 - left) / 8;
+    j->left = left;
+    j->line_bytes = wb;
+    j->x0 = (turned ? j->page_w - MARGIN_PX - 8 * wb : MARGIN_PX) / (unsigned)j->scale;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +249,76 @@ static int fail(capt_job_t *j, int r, const char *what)
 static int delay_ms(capt_job_t *j, uint32_t ms)
 {
     return j->io.delay ? j->io.delay(j->io.ctx, ms) : 0;
+}
+
+// Out of paper: both "no paper" bits of the last status (bit 1 of word 0 alone also shows while the printer is
+// offline between pages, see page_prologue). The job then waits, the other time limits stand still, and the
+// platform shows "Out of paper" (the status hook) until paper is loaded or the job ends.
+static volatile int s_paper_out;
+static int go_online(capt_job_t *j, uint16_t page);
+static uint16_t s_override[48];
+static void paper_probe(capt_job_t *j);
+
+int canon_capt_paper_out(void)
+{
+    return s_paper_out;
+}
+
+// Looks at the status just read. Returns true while the paper is out.
+static bool note_paper(capt_job_t *j)
+{
+    bool out = CAPT_FLAG(&j->c.st, CAPT_FL_NOPAPER1) && CAPT_FLAG(&j->c.st, CAPT_FL_NOPAPER2);
+    if (out && !s_paper_out)
+        LOGW("out of paper: waiting for paper");
+    else if (!out && s_paper_out)
+        LOGI("paper loaded, going on");
+    s_paper_out = out;
+    return out;
+}
+
+// While the paper is out: the paper sources (A0A1, for the log) every few polls, and a recovery step chosen at
+// run time with POST /capt?o=42&v=N, to find out what makes the printer go on after paper was loaded:
+// 1 clear error (E0A2), 2 clear misprint + error, 3 clear error + go online, 4 all three, 5 go offline,
+// clear error, go online.
+static void paper_probe(capt_job_t *j)
+{
+    capt_t *c = &j->c;
+    if (j->paper_ticks++ % 3 == 0) {
+        uint8_t b[160];
+        size_t n = sizeof(b);
+        capt_sendrecv(c, CAPT_CHKJOBSTAT, NULL, 0, b, &n);
+    }
+    if (!s_override[42])
+        return;
+    int v = s_override[42] & 0xFF;
+    s_override[42] = 0;
+    const uint16_t page = (uint16_t)(j->pages - j->pg_base);
+    LOGW("recovery step %d", v);
+    static const uint8_t off[2] = {0x01, 0x00};
+    if (v == 5)
+        capt_sendrecv(c, CAPT_LBP3000_SETUP_0, off, sizeof(off), NULL, NULL);
+    if (v == 2 || v == 4)
+        capt_sendrecv(c, CAPT_START_1, NULL, 0, NULL, NULL);
+    if (v >= 1)
+        capt_sendrecv(c, CAPT_START_2, NULL, 0, NULL, NULL);
+    if (v >= 3)
+        go_online(j, page);
+}
+
+// One step of a wait: true when the wait is over for good (the time is up; the paper wait has its own limit).
+static bool wait_expired(capt_job_t *j, int *spent_ms, int *paper_ms, uint32_t step_ms, int max_s)
+{
+    if (note_paper(j)) {
+        paper_probe(j);
+        *paper_ms += (int)step_ms;
+        if (*paper_ms >= PAPER_MAX_S * 1000) {
+            j->paper_gave_up = true;
+            return true;
+        }
+        return false;
+    }
+    *spent_ms += (int)step_ms;
+    return *spent_ms >= max_s * 1000;
 }
 
 // The job information command E1A1 (72 bytes): stage 1 starts the job, 2 a
@@ -284,6 +383,30 @@ static int job_prologue(capt_job_t *j)
     STEP(j, capt_sendrecv(&j->c, CAPT_START_0, NULL, 0, NULL, NULL), "START_0");
     n = sizeof(buf);
     STEP(j, capt_sendrecv(&j->c, CAPT_JOB_BEGIN, JOB_BEGIN_DATA, sizeof(JOB_BEGIN_DATA), buf, &n), "JOB_BEGIN");
+    // The printer refuses a new job (the reply holds an error code, 87 00 00 00, instead of 00 00 <id>; every
+    // command after it answers 88 00) while a job of an earlier session is still open: a board that restarted in
+    // the middle of one, or a job that was abandoned. Ending the old job by its id frees the printer; ids count
+    // from 1 after the printer was switched on.
+    if (n >= 4 && (buf[0] | buf[1]) != 0) {
+        LOGW("the printer refused the job (%02X %02X): ending jobs of an earlier session", buf[0], buf[1]);
+        for (uint16_t id = 1; id <= STALE_JOB_MAX; id++) {
+            uint8_t jb[2] = {(uint8_t)(id & 0xFF), (uint8_t)(id >> 8)};
+            uint8_t rb[8];
+            size_t rn = sizeof(rb);
+            STEP(j, capt_sendrecv(&j->c, CAPT_JOB_END, jb, 2, rb, &rn), "JOB_END");
+            if (rn >= 2 && (rb[0] | rb[1]) == 0) {
+                LOGI("ended job %u of an earlier session", id);
+                break;
+            }
+        }
+        STEP(j, capt_sendrecv(&j->c, CAPT_START_0, NULL, 0, NULL, NULL), "START_0");
+        n = sizeof(buf);
+        STEP(j, capt_sendrecv(&j->c, CAPT_JOB_BEGIN, JOB_BEGIN_DATA, sizeof(JOB_BEGIN_DATA), buf, &n), "JOB_BEGIN");
+        if (n >= 4 && (buf[0] | buf[1]) != 0) {
+            LOGW("the printer still refuses the job (%02X %02X)", buf[0], buf[1]);
+            return fail(j, -1, "JOB_BEGIN refused");
+        }
+    }
     j->job_id = n >= 4 ? (uint16_t)(buf[2] | (buf[3] << 8)) : 0;
     j->started = true;
     LOGI("job %u started", j->job_id);
@@ -296,8 +419,8 @@ static int job_prologue(capt_job_t *j)
 }
 
 // (value | 0x100) for each overridden byte, 0 = as built. 0..39: a byte of the page parameters;
-// 40 / 41: rotate the back of a long-edge / short-edge sheet by 180 degrees (value 0 or 1)
-static uint16_t s_override[48];
+// 40 / 41: rotate the back of a long-edge / short-edge sheet by 180 degrees (value 0 or 1);
+// 42: a recovery step while the paper is out (paper_probe)
 
 void canon_capt_set_override(int offset, int value)
 {
@@ -305,6 +428,14 @@ void canon_capt_set_override(int offset, int value)
         memset(s_override, 0, sizeof(s_override));
     else if (offset >= 0 && offset < 48)
         s_override[offset] = (uint16_t)(0x100 | (value & 0xFF));
+}
+
+// the shift of a side's window: the built-in one, or the override (index 43 front, 44 back; signed, 4 px units)
+static int side_shift(int idx, int dflt)
+{
+    if (s_override[idx])
+        return (int)(int8_t)(s_override[idx] & 0xFF) * 4;
+    return dflt;
 }
 
 static bool back_rotated(int duplex)
@@ -318,11 +449,16 @@ static bool back_rotated(int duplex)
 // The printer's own count of pages in progress, polled until it reaches want.
 static int wait_counter(capt_job_t *j, int what, unsigned want, int max_s, uint32_t poll_ms)
 {
-    for (int i = 0; i * (int)poll_ms < max_s * 1000; i++) {
+    int spent = 0, paper = 0;
+    for (;;) {
         STEP(j, capt_get_xstatus(&j->c), "status");
         unsigned have = what == 0 ? j->c.st.page_decoding : what == 1 ? j->c.st.page_printing : j->c.st.page_completed;
-        if (have >= want)
+        if (have >= want) {
+            s_paper_out = 0;
             return 0;
+        }
+        if (wait_expired(j, &spent, &paper, poll_ms, max_s))
+            break;
         STEP(j, delay_ms(j, poll_ms), "wait");
     }
     return fail(j, -2, "page counter");
@@ -333,7 +469,6 @@ static int wait_counter(capt_job_t *j, int what, unsigned want, int max_s, uint3
 static int page_prologue(capt_job_t *j, uint8_t flag)
 {
     capt_t *c = &j->c;
-    const unsigned page = (unsigned)j->pages + 1;
     j->cur_flag = flag;
     uint8_t parms[40] = {
         0x00, 0x00, j->model_key[0], j->model_key[1], (uint8_t)j->paper_sz, flag,
@@ -341,8 +476,9 @@ static int page_prologue(capt_job_t *j, uint8_t flag)
         0x00, 0x00, 0x00, 0x00,     // toner density
         0x00 /* media: plain */, 0x11 /* 600 dpi */, 0x04, 0x00,
         0x01, 0x01, 0x02 /* automatic image refinement */, 0x00 /* toner save */, 0x00, 0x00,
+        (uint8_t)(j->left & 0xFF), (uint8_t)(j->left >> 8),         // left margin (the first of the two: seen moving
+                                                                    // the image sideways on the printer, 2026-11-12)
         (uint8_t)(MARGIN_PX & 0xFF), (uint8_t)(MARGIN_PX >> 8),     // top margin
-        (uint8_t)(MARGIN_PX & 0xFF), (uint8_t)(MARGIN_PX >> 8),     // left margin
         (uint8_t)(j->line_bytes & 0xFF), (uint8_t)(j->line_bytes >> 8),
         (uint8_t)(j->lines & 0xFF), (uint8_t)(j->lines >> 8),
         (uint8_t)(j->page_w & 0xFF), (uint8_t)(j->page_w >> 8),
@@ -350,6 +486,50 @@ static int page_prologue(capt_job_t *j, uint8_t flag)
         0x00, 0x00, MEDIA_PLAIN /* fuser mode */, 0x00, 0x00, 0x00,
     };
     uint8_t hp[8];
+
+    // The printer goes offline (status word 0: bit 4, "no paper" bit 1, and it decodes nothing) when it has
+    // nothing left to print: the host was slow with the next page (a web page rendering one at 600 dpi). The
+    // start-up steps of a job bring it back, and its page counters start again from 0. The same state (8E12)
+    // shows when the paper is out, though, with word 1 bit 14 as well: that needs paper, not a restart (the
+    // restart clears the flag and the printer stays dead), so the job waits for the paper first.
+    if (j->pages > j->pg_base) {
+        int paper_ms = 0;
+        STEP(j, capt_get_xstatus(c), "status");
+        while (note_paper(j)) {
+            paper_probe(j);
+            if ((paper_ms += 1000) >= PAPER_MAX_S * 1000) {
+                j->paper_gave_up = true;
+                return fail(j, -2, "paper");
+            }
+            STEP(j, delay_ms(j, 1000), "wait");
+            STEP(j, capt_get_xstatus(c), "status");
+        }
+        // Idle and offline: nothing is left in progress (the counters agree: decoded = printed, ejected = finished).
+        // A printer that shows the flag with pages still in progress is not restarted: that would throw them away
+        // (seen with a 9E12 right after a page was started, 2026-11-10: the restart lost the page and the printer
+        // then refused every job until it was switched off).
+        const bool idle = c->st.page_decoding == c->st.page_printing && c->st.page_out == c->st.page_completed;
+        if (CAPT_FLAG(&c->st, CAPT_FL_UNINIT2) && !idle)
+            LOGW("status %04X with pages in progress (%u/%u/%u/%u): not restarting", c->st.status[0],
+                 c->st.page_decoding, c->st.page_printing, c->st.page_out, c->st.page_completed);
+        if (CAPT_FLAG(&c->st, CAPT_FL_UNINIT2) && idle) {
+            LOGI("the printer went offline after %d page(s) (status %04X): starting it again", j->pages,
+                 c->st.status[0]);
+            STEP(j, capt_sendrecv(c, CAPT_START_1, NULL, 0, NULL, NULL), "START_1");
+            STEP(j, capt_sendrecv(c, CAPT_START_2, NULL, 0, NULL, NULL), "START_2");
+            STEP(j, capt_sendrecv(c, CAPT_START_3, NULL, 0, NULL, NULL), "START_3");
+            STEP(j, go_online(j, 0), "session start");
+            STEP(j, capt_get_xstatus(c), "status");
+            // count from the printer's counters: they start again from 0 after a restart, but not always
+            if (c->st.page_decoding == 0 && c->st.page_completed == 0) {
+                j->pg_base = j->pages;
+                j->sheet_base = j->sheets;
+            }
+            LOGI("after the restart: status %04X, counters %u/%u/%u/%u", c->st.status[0], c->st.page_decoding,
+                 c->st.page_printing, c->st.page_out, c->st.page_completed);
+        }
+    }
+    const unsigned page = (unsigned)(j->pages - j->pg_base) + 1;
 
     // the printer is a few pages ahead of the host at most
     if (page > 2)
@@ -392,7 +572,7 @@ static int page_prologue(capt_job_t *j, uint8_t flag)
 static int page_epilogue(capt_job_t *j)
 {
     capt_t *c = &j->c;
-    const uint16_t page = (uint16_t)(j->pages + 1);
+    const uint16_t page = (uint16_t)(j->pages - j->pg_base + 1);
 
     STEP(j, capt_send(c, CAPT_PRINT_DATA_END, NULL, 0), "end of data");
     STEP(j, wait_counter(j, 0, page, DECODE_MAX_S, 500), "decode");
@@ -408,9 +588,9 @@ static int page_epilogue(capt_job_t *j)
 
 static int job_epilogue(capt_job_t *j)
 {
-    if (j->sheets)     // the printer's "completed" counts sheets
-        STEP(j, wait_counter(j, 2, (unsigned)j->sheets, PRINT_MAX_S, 1000), "printing");
-    STEP(j, job_info(j, 4, (uint16_t)j->pages), "job end info");
+    if (j->sheets > j->sheet_base)     // the printer's "completed" counts sheets
+        STEP(j, wait_counter(j, 2, (unsigned)(j->sheets - j->sheet_base), PRINT_MAX_S, 1000), "printing");
+    STEP(j, job_info(j, 4, (uint16_t)(j->pages - j->pg_base)), "job end info");
     uint8_t jb[2] = {(uint8_t)(j->job_id & 0xFF), (uint8_t)(j->job_id >> 8)};
     STEP(j, capt_sendrecv(&j->c, CAPT_JOB_END, jb, 2, NULL, NULL), "JOB_END");
     return 0;
@@ -443,11 +623,13 @@ static int send_band(capt_job_t *j, const uint8_t *data, size_t size)
         size_t n = size > PACKET_MAX ? PACKET_MAX : size;
         if (++j->packets % 16 == 0) {
             // flow control: don't send while the printer says its buffer is full
-            for (int i = 0;; i++) {
+            int spent = 0, paper = 0;
+            for (;;) {
                 STEP(j, capt_get_xstatus(&j->c), "status");
+                note_paper(j);
                 if (!CAPT_FLAG(&j->c.st, CAPT_FL_BUFFERFULL))
                     break;
-                if (i >= BUFFER_MAX_S)
+                if (wait_expired(j, &spent, &paper, 1000, BUFFER_MAX_S))
                     return fail(j, -2, "printer buffer full");
                 STEP(j, delay_ms(j, 1000), "wait");
             }
@@ -499,6 +681,8 @@ static int put_row(capt_job_t *j, const uint8_t *bits)
 // the held front, as a page of its own
 static int print_held(capt_job_t *j, uint8_t flag)
 {
+    j->left = j->held_left;                 // the front's own window, whatever the page after it set
+    j->line_bytes = j->held_bytes;
     STEP(j, page_prologue(j, flag), "front side");
     for (size_t off = 0; off < j->held_len;) {
         const uint8_t *q = j->big + off;
@@ -541,6 +725,7 @@ static void *job_begin(const printer_driver_t *d, const printer_io_t *io, int dp
     capt_job_t *j = calloc(1, sizeof(*j));
     if (!j)
         return NULL;
+    s_paper_out = 0;
     j->io = *io;
     capt_init(&j->c, &j->io);
     j->model_key[0] = 0x94;
@@ -549,9 +734,10 @@ static void *job_begin(const printer_driver_t *d, const printer_io_t *io, int dp
     j->scale = 600 / dpi;
     j->page_w = GEOM[paper].px_w;
     j->page_h = GEOM[paper].px_h;
-    j->line_bytes = GEOM[paper].line_bytes;
+    j->line_bytes = j->nominal_bytes = GEOM[paper].line_bytes;
     j->lines = GEOM[paper].lines;
     j->paper_sz = GEOM[paper].sz;
+    j->left = MARGIN_PX;
     j->x0 = MARGIN_PX / (unsigned)j->scale;     // source pixels
     j->comp_size = 2 * (size_t)j->line_bytes * BAND_LINES;
     j->band = calloc(BAND_LINES, j->line_bytes);
@@ -566,6 +752,19 @@ static void *job_begin(const printer_driver_t *d, const printer_io_t *io, int dp
     }
     job_prologue(j);
     return j;
+}
+
+// The platform's status (IPP reasons, the web UI's message): the printer has no back channel to poll, so
+// this is what the running job saw last.
+static void status(const char *state, const char *detail, const char *data, airprint_status_t *st)
+{
+    (void)state;
+    (void)detail;
+    (void)data;
+    if (s_paper_out && st->nreasons < (int)(sizeof(st->reasons) / sizeof(st->reasons[0]))) {
+        st->reasons[st->nreasons++] = "media-empty-error";
+        snprintf(st->message, sizeof(st->message), "Out of paper");
+    }
 }
 
 static void page_options(void *job, int duplex)
@@ -600,16 +799,21 @@ static int page_begin(void *job, int src_w, int src_h, int bytes_pp)
             return -1;
         j->side = SIDE_ONE;
         j->rotate = false;
+        set_window(j, 0, false);
         if (page_prologue(j, 0) < 0)
             return -1;
     } else if (!j->held) {
         j->side = SIDE_FRONT;                   // nothing goes to the printer until the back is here
         j->rotate = back_rotated(mode);
+        set_window(j, side_shift(43, FRONT_SHIFT_PX), false);
+        j->held_left = j->left;
+        j->held_bytes = j->line_bytes;
         j->held_len = 0;
-        j->held_cap = j->big_size - (j->rotate ? (size_t)j->line_bytes * j->lines : 0);
+        j->held_cap = j->big_size - (j->rotate ? (size_t)j->nominal_bytes * j->lines : 0);
     } else {
         j->side = SIDE_BACK;
         j->rotate = back_rotated(mode);
+        set_window(j, side_shift(44, BACK_SHIFT_PX), j->rotate);
         if (j->rotate) {
             const size_t raw_size = (size_t)j->line_bytes * j->lines;
             if (j->big_size < raw_size + j->held_len)
@@ -700,6 +904,8 @@ static int job_end(void *job)
             ret = -1;
         }
     }
+    if (!j->paper_gave_up)
+        s_paper_out = 0;        // a job that gave up waiting leaves "Out of paper" on the screen
     free(j->band);
     free(j->comp);
     free(j->row);
@@ -779,7 +985,6 @@ const printer_driver_t canon_lbp3300_driver = {
     .usb_vid = 0x04a9,
     .usb_pid = 0x267e,
     .color = false,
-    .scanner = false,
     .duplex = true,
     .raw_io = true,
     .resolutions = {300, 600},
@@ -792,6 +997,7 @@ const printer_driver_t canon_lbp3300_driver = {
     .margin_bottom = 500,
     .job_begin = job_begin,
     .page_options = page_options,
+    .status = status,
     .page_begin = page_begin,
     .page_line = page_line,
     .page_end = page_end,

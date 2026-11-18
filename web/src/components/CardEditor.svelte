@@ -1,28 +1,23 @@
 <script lang="ts">
-  import ScanLine from '@lucide/svelte/icons/scan-line';
   import FolderOpen from '@lucide/svelte/icons/folder-open';
   import Crop from '@lucide/svelte/icons/crop';
   import X from '@lucide/svelte/icons/x';
-  import LoaderCircle from '@lucide/svelte/icons/loader-circle';
   import RectangleHorizontal from '@lucide/svelte/icons/rectangle-horizontal';
   import RectangleVertical from '@lucide/svelte/icons/rectangle-vertical';
   import Modal from './Modal.svelte';
   import CropEditor from './CropEditor.svelte';
   import ItemThumb from './ItemThumb.svelte';
   import { detectContent, fitAspect } from '../lib/autocrop';
-  import { device } from '../lib/device.svelte';
   import { CARD_MM } from '../lib/layout';
   import { renderRef, refSize, updateItem, work, type Item, type PageRef } from '../lib/process.svelte';
-  import { startKept, whenSaved } from '../lib/scan.svelte';
   import type { StoredFile } from '../lib/files.svelte';
-  import { pickFiles, toast } from '../lib/ui.svelte';
+  import { pickFiles } from '../lib/ui.svelte';
 
   type Card = Extract<Item, { kind: 'card' }>;
   let { id, onclose }: { id: string; onclose: () => void } = $props();
 
   const card = $derived(work.items.find((i) => i.id === id) as Card | undefined);
   const aspect = $derived(card?.vertical ? CARD_MM.h / CARD_MM.w : CARD_MM.w / CARD_MM.h);
-  let scanning = $state<'' | 'front' | 'back'>('');
   let editing = $state<'' | 'front' | 'back'>('');
 
   function set(side: 'front' | 'back', ref: PageRef | null) {
@@ -55,20 +50,6 @@
     if (f) set(side, await autoRef(f));
   }
 
-  async function scan(side: 'front' | 'back') {
-    scanning = side;
-    try {
-      const sid = await startKept('card', 300);
-      const f = await whenSaved(sid);
-      if (!f) throw new Error(device.scan?.error || 'the scan did not finish');
-      set(side, await autoRef(f));
-    } catch (e) {
-      toast(`Scan failed: ${(e as Error).message}`, 'error');
-    } finally {
-      scanning = '';
-    }
-  }
-
   function turn() {
     updateItem(id, (it) => ({ ...(it as Card), vertical: !(it as Card).vertical }));
   }
@@ -79,8 +60,7 @@
     <div class="layout">
       <div class="sides">
         <p class="muted small">
-          Both sides of a card on one sheet, at the card's real size. Put the card in the corner of the glass by the
-          arrow and scan the front, then turn it over and scan the back. Or use pictures from Files.
+          Both sides of a card on one sheet, at the card's real size. Use pictures of the card from Files.
         </p>
         {#each ['front', 'back'] as const as side}
           {@const ref = card[side]}
@@ -93,22 +73,14 @@
               {/if}
             </div>
             <div class="slot" style:aspect-ratio={aspect}>
-              {#if scanning === side}
-                <div class="center muted"><LoaderCircle class="spin" /> Scanning…</div>
-              {:else if ref}
+              {#if ref}
                 <ItemThumb item={{ id: `${id}-${side}`, kind: 'page', ref }} max={300} />
               {:else}
                 <div class="center muted small">Not set yet</div>
               {/if}
             </div>
             <div class="row wrap">
-              <button
-                class="btn primary"
-                onclick={() => scan(side)}
-                disabled={!!scanning || !device.scan?.scanner || device.scan?.state === 'scanning'}
-                ><ScanLine size={17} /> Scan {side}</button
-              >
-              <button class="btn" onclick={() => fromFiles(side)} disabled={!!scanning}><FolderOpen size={17} /> From Files</button>
+              <button class="btn" onclick={() => fromFiles(side)}><FolderOpen size={17} /> From Files</button>
             </div>
           </div>
         {/each}

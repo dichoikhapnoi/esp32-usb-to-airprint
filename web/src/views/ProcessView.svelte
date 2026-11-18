@@ -126,7 +126,7 @@
     <Layers size={40} strokeWidth={1.4} />
     <div>
       <b>Nothing here yet</b>
-      <p class="small">Add scans, pictures or PDF pages from Files, or start an ID card copy: both sides of a card on one sheet.</p>
+      <p class="small">Add pictures or PDF pages from Files, or start an ID card copy: both sides of a card on one sheet.</p>
     </div>
     <div class="row wrap" style="justify-content:center">
       <button class="btn primary" onclick={fromFiles}><FolderOpen size={17} /> Add from Files</button>

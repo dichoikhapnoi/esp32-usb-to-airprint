@@ -4,10 +4,7 @@
 #  2. the AirPrint/IPP server over QEMU's emulated Ethernet: IPP conformance
 #     tests and URF print jobs, whose printer stream CRC must match the host
 #     build of the same server
-#  3. scanning from the emulated scanner: streamed scans (through a ring much
-#     smaller than the image) must be the host build's JPEGs, and a kept scan
-#     that does not fit must fail cleanly
-#  4. the debug server: info, log (HTTP and live stream), OTA updates: bad
+#  3. the debug server: info, log (HTTP and live stream), OTA updates: bad
 #     images refused, an update rebooted before it confirmed itself rolled
 #     back by the bootloader, an update that confirms itself kept (with
 #     tools/remote.py); a crash: core dump, summary, decoded by remote.py
@@ -84,50 +81,18 @@ if grep -q "QEMU_SELFTEST ipp ready" "$OUT/serial.log"; then
     js=$(curl -s -m 10 --compressed $W/ | grep -oE '/assets/index-[^"]+\.js' | head -1)
     etag=$(curl -s -m 10 -D - -o /dev/null $W/ | tr -d '\r' | awk '/^ETag:/ {print $2}')
     if [ -n "$js" ] && [ "$(curl -s -m 20 --compressed -o /dev/null -w '%{http_code}' $W$js)" = 200 ] &&
-       [ "$(curl -s -m 10 -o /dev/null -w '%{http_code}' -H "If-None-Match: $etag" $W/)" = 304 ] &&
-       [ "$(curl -s -m 10 -o /dev/null -w '%{http_code}' $W/scan)" = 302 ]; then
-        echo "MATCH web UI on port 80: page, assets (gzip), 304 on its ETag, /scan redirect"
+       [ "$(curl -s -m 10 -o /dev/null -w '%{http_code}' -H "If-None-Match: $etag" $W/)" = 304 ]; then
+        echo "MATCH web UI on port 80: page, assets (gzip), 304 on its ETag"
     else
         echo "MISMATCH web UI on port 80 (asset '$js', ETag '$etag')"; status=1
     fi
     # (curl ends the endless event stream with a timeout error: keep its output only)
     events=$(curl -s -N -m 4 $W/events 2>/dev/null || true)
-    if curl -s -m 10 $W/api/state | python3 -c "import json,sys; s=json.load(sys.stdin); assert s['printer']['connected'] and 'scanner' in s['scan']" &&
+    if curl -s -m 10 $W/api/state | python3 -c "import json,sys; s=json.load(sys.stdin); assert s['printer']['connected']" &&
        grep -q '^event: state' <<<"$events"; then
         echo "MATCH live state: /api/state and the /events stream"
     else
         echo "MISMATCH live state"; status=1
-    fi
-
-    # --- scanning
-    S=http://localhost:18000/scan
-    same() {    # same <what> <esp32 file> <host file>
-        if cmp -s "$2" "$3"; then
-            echo "MATCH $1: $(wc -c < "$2" | tr -d ' ') bytes, identical to the host build"
-        else
-            echo "MISMATCH $1: esp32s3 $(wc -c < "$2" 2>/dev/null | tr -d ' ') bytes vs host $(wc -c < "$3" | tr -d ' ')"; status=1
-        fi
-    }
-    host/scan_host scan 150 a4 "$OUT/ref150.jpg" "$OUT/ref150.ppm" >/dev/null 2>&1
-    host/scan_host scan 300 letter "$OUT/ref300.jpg" "$OUT/ref300.ppm" >/dev/null 2>&1
-    curl -s -m 900 -o "$OUT/esp150.jpg" "$S/stream.jpg?dpi=150&paper=a4" || true
-    same "scan stream 150 dpi A4" "$OUT/esp150.jpg" "$OUT/ref150.jpg"
-    curl -s -m 1800 -o "$OUT/esp300.jpg" "$S/stream.jpg?dpi=300&paper=letter" || true
-    same "scan stream 300 dpi Letter (ring wraps)" "$OUT/esp300.jpg" "$OUT/ref300.jpg"
-    # the 48 KB buffer cannot hold a kept scan: it must fail cleanly
-    curl -s -m 10 -X POST "$S/last?paper=a4" >/dev/null || true
-    for i in $(seq 1 900); do
-        curl -s -m 10 "$S/status" | grep -q '"state":"scanning"' || break
-        sleep 1
-    done
-    if curl -s -m 10 "$S/status" | grep -q "does not fit"; then
-        echo "MATCH scan kept 150 dpi: refused cleanly (does not fit in the 48 KB buffer)"
-    else
-        echo "MISMATCH scan kept 150 dpi: $(curl -s -m 10 "$S/status")"; status=1
-    fi
-    grep "QEMU_SCAN" "$OUT/serial.log" | sed -E 's/.*QEMU_SCAN /  esp32s3 scan: /'
-    if grep "QEMU_SCAN" "$OUT/serial.log" | grep -vq "violations=0 "; then
-        echo "emulated scanner saw protocol violations"; status=1
     fi
 
     # --- debug server and OTA
@@ -144,9 +109,9 @@ if grep -q "QEMU_SELFTEST ipp ready" "$OUT/serial.log"; then
     check "debug /info partition" "$(field partition) $(field ota_state)" "ota_0 valid"
     check "status screen without a display: disabled, no task" \
         "$(grep -aq 'oled: no display at 0x3c.*screen disabled' "$OUT/serial.log" && echo reported) $(curl -s -m 10 $D/info | awk '$1 == "oled"' | wc -l | tr -d ' ')" "reported 0"
-    # (the 16 KB ring has long dropped the boot; the scans' last lines are recent)
-    check "debug /log has the scans" "$(curl -s -m 10 $D/log | grep -ac 'QEMU_SCAN')" 3
-    check "debug live log (port 2323)" "$(nc -w 3 localhost 12323 | grep -ac 'QEMU_SCAN')" 3
+    # (the 16 KB ring may have dropped the boot; the print jobs' lines are recent)
+    check "debug /log has the jobs" "$(curl -s -m 10 $D/log | grep -aq 'QEMU_JOB' && echo yes)" yes
+    check "debug live log (port 2323)" "$(nc -w 3 localhost 12323 | grep -aq 'QEMU_JOB' && echo yes)" yes
     head -c 200000 /dev/urandom > "$OUT/junk.bin"
     check "OTA of a non-image" "$(curl -s -m 60 --data-binary @"$OUT/junk.bin" $D/ota)" \
         "OTA failed: not an ESP firmware image (use firmware.bin, not the .elf)"

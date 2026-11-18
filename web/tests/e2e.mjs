@@ -1,16 +1,14 @@
 // End-to-end test of the web UI in headless Chrome, against the host build of
-// the server (host/airprint_host, emulated scanner, jobs to host/out/job-N.prn):
-// upload a PDF and print it, scan, a button scan that two browsers receive,
-// Process (rotate, ID card, PDF export) and the phone layout. Screenshots go
+// the server (host/airprint_host, jobs to host/out/job-N.prn): upload a PDF and
+// print it, Process (rotate, ID card, PDF export) and the phone layout. Screenshots go
 // to host/out/ui-*.png.
 //
-//   BASE=http://localhost:8641 SERVER_PID=<pid> node tests/e2e.mjs
+//   BASE=http://localhost:8641 node tests/e2e.mjs
 import { chromium } from 'playwright-core';
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync } from 'node:fs';
 
 const BASE = process.env.BASE || 'http://localhost:8641';
-const PID = Number(process.env.SERVER_PID || 0);
 const OUT = new URL('../../host/out/', import.meta.url).pathname;
 // CUPS's samples (gzipped there; run_tests.sh unpacks them)
 const DOC = `${OUT}e2e/document-a4.pdf`;
@@ -69,64 +67,12 @@ try {
   await page.getByText(/Printed 1 page of color.jpg/).waitFor({ timeout: 180000 });
   step('print: photo at 600 dpi');
 
-  // scan from the page (kept, 150 dpi)
-  await page.click('a[href="#/scanner"]');
-  await page.getByRole('button', { name: '150 dpi' }).click();
-  await page.getByRole('button', { name: /^A4$/ }).click();
-  await page.getByRole('button', { name: /^Scan$/ }).click();
-  await page.locator('.beam').waitFor();
-  await page.waitForTimeout(1500);
-  await shot(page, 'scanning');
-  await page.getByText('Scan saved to Files').waitFor({ timeout: 120000 });
-  await page.getByRole('button', { name: 'Print a copy' }).waitFor();
-  step('scan: live preview, saved to Files');
-  await shot(page, 'scanned');
-
-  // the button: a second browser (its own IndexedDB) and a second tab both get it
-  const ctx2 = await browser.newContext({ viewport: { width: 1000, height: 800 } });
-  const other = await ctx2.newPage();
-  watch(other, 'second browser');
-  await other.goto(BASE + '/#/scanner');
-  await other.getByText('Online').waitFor();
-  const tab2 = await ctx.newPage();
-  watch(tab2, 'second tab');
-  await tab2.goto(BASE + '/#/files');
-  await tab2.getByText('Online').waitFor();
-  const scanCount = (pg) =>
-    pg.evaluate(async () => {
-      const all = await new Promise((res) => {
-        const r = indexedDB.open('printer-web');
-        r.onsuccess = () => {
-          const q = r.result.transaction('files').objectStore('files').getAll();
-          q.onsuccess = () => res(q.result);
-        };
-      });
-      return all.filter((f) => f.source === 'scan').length;
-    });
-  const scansBefore = await scanCount(page);
-  if (PID) {
-    process.kill(PID, 'SIGUSR1');
-    await other.getByText(/started from the button/).waitFor({ timeout: 20000 });
-    await other.waitForTimeout(1500);
-    await shot(other, 'button-scan');
-    await other.getByText('Scan saved to Files').waitFor({ timeout: 120000 });
-    let counts = 0;
-    for (let i = 0; i < 20 && counts <= scansBefore; i++) {
-      await page.waitForTimeout(500);
-      counts = await scanCount(page);
-    }
-    await page.waitForTimeout(3000); // a second save would show by now
-    counts = await scanCount(page);
-    assert.equal(counts, scansBefore + 1, 'two tabs of one browser save the button scan once');
-    step('button scan: shown live and saved by a second browser, once per browser');
-  }
-
-  // Process: the scan and the PDF, rotate, ID card, export
+  // Process: the photo and the PDF, rotate, ID card, export
   await page.bringToFront();
   await page.click('a[href="#/process"]');
   await page.getByRole('button', { name: 'Add from Files' }).first().click();
   await page.locator('.modal .tile', { hasText: 'document-a4.pdf' }).click();
-  await page.locator('.modal .tile', { hasText: /Scan \d{4}/ }).first().click();
+  await page.locator('.modal .tile', { hasText: 'color.jpg' }).first().click();
   await page.getByRole('button', { name: /^Add 2/ }).click();
   await page.locator('.item').nth(3).waitFor();
   await page.locator('.item').first().getByRole('button', { name: 'Rotate right' }).click();
@@ -215,11 +161,6 @@ try {
   await mp.getByText('What would you like to do?').waitFor();
   await mp.getByText('Online').waitFor();
   await shot(mp, 'phone-home');
-  await mp.getByRole('link', { name: /Scanner/ }).click();
-  await mp.getByRole('button', { name: /^Scan$/ }).waitFor();
-  await shot(mp, 'phone-scanner');
-  await mp.getByRole('link', { name: 'Back to the menu' }).click();
-  await mp.getByText('What would you like to do?').waitFor();
   await mp.getByRole('link', { name: /Printer/ }).click();
   await mp.getByRole('heading', { name: /Canon MG2500/ }).waitFor();
   await shot(mp, 'phone-printer');

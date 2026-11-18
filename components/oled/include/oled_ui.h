@@ -13,7 +13,6 @@
 #include <stdint.h>
 
 #include "airprint.h"
-#include "scan_service.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,7 +24,7 @@ extern "C" {
 // 8p..8p+7, bit 0 at the top
 #define OLED_FB_SIZE (OLED_WIDTH * OLED_HEIGHT / 8)
 
-// how long a finished job or scan stays on the screen
+// how long a finished job stays on the screen
 #define OLED_RESULT_S 60
 
 typedef struct {
@@ -35,7 +34,6 @@ typedef struct {
     int rssi;                   // dBm, 0 = unknown
     bool started;               // the print server runs (else only print.status.connected counts)
     airprint_activity_t print;
-    scan_info_t scan;           // state NULL = no scanner service
 } oled_state_t;
 
 // Draws the screen for this state into fb (OLED_FB_SIZE bytes).

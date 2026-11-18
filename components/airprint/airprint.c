@@ -986,6 +986,8 @@ static int pipe_page_begin(void *user, const raster_page_t *pg)
         p->err = IPP_DOCUMENT_FORMAT_ERROR;
         return 2;
     }
+    LOGI("job %d: page %d: %d x %d px at %d dpi, sides %d", p->job->id, pg->page, pg->width, pg->height, pg->dpi,
+         pg->duplex);
     p->job->line = 0;
     p->job->height = pg->height;
     if (d->page_options)

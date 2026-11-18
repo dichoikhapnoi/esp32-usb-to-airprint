@@ -2,8 +2,8 @@
 // browser that listens on GET /events (Server-Sent Events) whenever it
 // changes, and readable once at GET /api/state.
 //
-// The snapshot is {"<key>": <value>, ...}, one member per source (printer,
-// scan, ...). A single thread serves all listeners: it rebuilds the snapshot
+// The snapshot is {"<key>": <value>, ...}, one member per source
+// (printer, ...). A single thread serves all listeners: it rebuilds the snapshot
 // every TICK and sends it when it differs from the last one, or a keep-alive
 // comment every 15 s. Listeners hand their socket over to that thread, so they
 // take no connection slot or thread of the HTTP server. A listener that
@@ -29,7 +29,7 @@ typedef int (*events_source_fn)(void *ctx, char *buf, size_t n);
 // Adds a snapshot member; before events_start. key must stay valid.
 void events_add_source(const char *key, events_source_fn fn, void *ctx);
 int events_start(void);
-// Rebuild the snapshot now rather than at the next tick (e.g. a scan ended).
+// Rebuild the snapshot now rather than at the next tick (e.g. a job ended).
 void events_poke(void);
 // GET /events and GET /api/state; false for other paths.
 bool events_http(airprint_http_t *h, const char *method, const char *path);

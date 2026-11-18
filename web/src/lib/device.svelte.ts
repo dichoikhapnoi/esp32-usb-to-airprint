@@ -31,36 +31,13 @@ export interface PrinterState {
   jobs: Job[];
 }
 
-export interface ScanState {
-  scanner: boolean;
-  state: 'idle' | 'scanning' | 'done' | 'failed' | 'canceled';
-  mode: 'stream' | 'last';
-  id: string;
-  source: string; // web, stream, button, escl
-  dpi: number;
-  paper: string;
-  width: number;
-  height: number;
-  lines: number;
-  bytes: number;
-  elapsed: number;
-  recent: boolean; // ended in the last 10 minutes
-  error: string;
-  last: number; // bytes of the kept scan, 0 = none
-  last_id: string;
-  last_paper: string;
-  last_dpi: number;
-  button: { dpi: number; paper: string };
-}
-
 export const device = $state({
   online: false, // the event stream is up
   loaded: false,
   printer: null as PrinterState | null,
-  scan: null as ScanState | null,
 });
 
-type Listener = (prev: { printer: PrinterState | null; scan: ScanState | null }) => void;
+type Listener = (prev: { printer: PrinterState | null }) => void;
 const listeners: Listener[] = [];
 
 // called after every snapshot with the previous one
@@ -69,10 +46,9 @@ export function onState(fn: Listener): () => void {
   return () => listeners.splice(listeners.indexOf(fn), 1);
 }
 
-function apply(js: { printer?: PrinterState; scan?: ScanState }) {
-  const prev = { printer: device.printer, scan: device.scan };
+function apply(js: { printer?: PrinterState }) {
+  const prev = { printer: device.printer };
   device.printer = js.printer ?? null;
-  device.scan = js.scan ?? null;
   device.loaded = true;
   for (const fn of [...listeners]) fn(prev);
 }

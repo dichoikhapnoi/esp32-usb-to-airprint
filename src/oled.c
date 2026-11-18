@@ -11,7 +11,6 @@
 #include "freertos/task.h"
 #include "local_config.h"
 #include "oled_ui.h"
-#include "scan_service.h"
 #include "sdkconfig.h"
 #include "usb_printer.h"
 #include "wifi.h"
@@ -169,8 +168,6 @@ static void gather(oled_state_t *st)
         st->print.job.percent = -1;
         st->print.job.ended_ago = -1;
     }
-    if (st->started)
-        scan_service_get_info(&st->scan);
 }
 
 static void oled_task(void *arg)

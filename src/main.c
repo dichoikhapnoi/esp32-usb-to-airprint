@@ -1,13 +1,11 @@
 // ESP32-S3 print server for the Canon PIXMA MG2500 series.
 //
 // LED: solid yellow = ready, no printer / solid green = printer attached /
-//      blinking green = printing (test page or AirPrint) or scanning / fast red = last
+//      blinking green = printing (test page or AirPrint) / fast red = last
 //      job failed / blue flashes = Identify-Printer.
-// BOOT button (and a second one on GPIO4, the same): press = scan an A4 page
-//      at 150 dpi (kept on the device: every open web page shows it and saves
-//      it to its Files), double press = print an A4 colour test page (dry run
-//      without a printer), hold 2 s while printing or scanning = cancel. While
-//      the screen is off, a press only turns it on.
+// BOOT button (and a second one on GPIO4, the same): double press = print an
+//      A4 test page (dry run without a printer), hold 2 s while printing =
+//      cancel. While the screen is off, a press only turns it on.
 // User button (GPIO5): wired and debounced, but does nothing yet: a free
 //      button for your own feature (on_user_button below).
 // AirPrint: joins the WiFi from .env and serves IPP on port 631; the web UI
@@ -29,7 +27,6 @@
 #include "local_config.h"
 #include "oled.h"
 #include "print_job.h"
-#include "scan_service.h"
 #include "sdkconfig.h"
 #include "status_led.h"
 #include "usb_printer.h"
@@ -61,7 +58,6 @@ static void on_printer(bool connected, const usb_printer_info_t *info)
         ESP_LOGI(TAG, "printer ready: %s %s", info->manufacturer, info->product);
         if (print_job_set_printer(info))
             airprint_esp_driver_changed();     // another model: announce it
-        scan_service_recalibrate();     // maybe powered off and on: calibrate again
     }
     show_idle_state();
 }
@@ -97,21 +93,7 @@ static void print_task(void *arg)
 
 static void on_press(void)
 {
-    if (s_busy || s_airprint_busy) {
-        ESP_LOGI(TAG, "busy; hold BOOT for 2 s to cancel");
-        return;
-    }
-    const char *why;
-    if (scan_service_start_button(&why) == 0) {
-        ESP_LOGI(TAG, "button: scanning; the web pages receive the scan");
-        return;
-    }
-    ESP_LOGW(TAG, "button: cannot scan: %s", why);
-    s_showing_error = true;
-    status_led_set(LED_ERROR);
-    vTaskDelay(pdMS_TO_TICKS(ERROR_SHOW_MS / 2));
-    s_showing_error = false;
-    show_idle_state();
+    ESP_LOGI(TAG, "%s", s_busy || s_airprint_busy ? "busy; hold BOOT for 2 s to cancel" : "press BOOT twice for a test page");
 }
 
 static void on_double_press(void)
@@ -214,7 +196,6 @@ static void button_task(void *arg)
             if (s_busy || s_airprint_busy) {
                 ESP_LOGW(TAG, "cancel requested");
                 usb_printer_cancel();
-                scan_service_cancel();
             }
         }
 
@@ -264,7 +245,7 @@ void app_main(void)
     oled_start(HOSTNAME);
     ESP_ERROR_CHECK(usb_printer_start(on_printer));
     xTaskCreate(button_task, "button", 3072, NULL, 5, NULL);
-    ESP_LOGI(TAG, "ready: press BOOT (or GPIO%d) to scan, twice for a test page", CONFIG_PRINT_BUTTON2_GPIO);
+    ESP_LOGI(TAG, "ready: press BOOT (or GPIO%d) twice for a test page", CONFIG_PRINT_BUTTON2_GPIO);
 
     xTaskCreate(ota_confirm_task, "ota_confirm", 3072, NULL, 2, NULL);
     // AirPrint; the printer keeps working locally if WiFi isn't configured

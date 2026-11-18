@@ -24,7 +24,7 @@
 // available). Call early: everything before is only on the UART.
 void debug_log_start(size_t ring_size);
 // HTTP server and log stream. busy() (optional) refuses OTA while it returns
-// true (printing, scanning).
+// true (printing).
 esp_err_t debug_server_start(bool (*busy)(void));
 
 // For a freshly updated image (pending verification): waits until healthy()

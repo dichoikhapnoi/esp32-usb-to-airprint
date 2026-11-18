@@ -69,7 +69,6 @@
     if (!device.online) return 'The printer box is not reachable.';
     if (!p?.connected) return 'No printer is connected to the printer box.';
     if (p.state === 'processing') return 'The printer is busy with another job.';
-    if (device.scan?.state === 'scanning') return 'The printer is scanning.';
     return '';
   });
 

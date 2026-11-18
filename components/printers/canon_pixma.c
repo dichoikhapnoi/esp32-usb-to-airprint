@@ -1,7 +1,7 @@
 // Canon PIXMA MG2500 series and its relatives: BJ raster in IVEC XML
 // (components/canon_bjl), with the status from the IVEC GetStatusResponse
 // back channel. One driver per model series (the list at the end); they only
-// differ in their names, USB ids, scanner and stream variant (bjl_model_t).
+// differ in their names, USB ids and stream variant (bjl_model_t).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -225,9 +225,8 @@ static const bjl_model_id_t MODELS[BJL_MODEL_COUNT] = {
 };
 
 // mdl: the IEEE 1284 MDL; pid: the USB product id (from SANE's pixma
-// backend), 0 when unknown (matched by mdl); scanner: a pixma flatbed that
-// works like the MG2500's up to 600 dpi (SANE generation 4 or 5).
-#define CANON_PIXMA(var, id_, mdl, pid, bjl_model, has_scanner)                                                       \
+// backend), 0 when unknown (matched by mdl).
+#define CANON_PIXMA(var, id_, mdl, pid, bjl_model)                                                                    \
     const printer_driver_t var = {                                                                                     \
         .id = id_,                                                                                                     \
         .make_model = "Canon " mdl,                                                                                    \
@@ -236,7 +235,6 @@ static const bjl_model_id_t MODELS[BJL_MODEL_COUNT] = {
         .usb_vid = (pid) ? 0x04a9 : 0,                                                                                 \
         .usb_pid = pid,                                                                                                \
         .color = true,                                                                                                 \
-        .scanner = has_scanner,                                                                                        \
         .resolutions = {300, 600},                                                                                     \
         .nresolutions = 2,                                                                                             \
         .papers = PAPERS,                                                                                              \
@@ -258,26 +256,26 @@ static const bjl_model_id_t MODELS[BJL_MODEL_COUNT] = {
 
 // Tested on the hardware: the MG2500 series. The others send what Gutenprint
 // sends for them (tools/compare_gutenprint.py --model), untested on paper.
-CANON_PIXMA(canon_mg2500_driver, "canon-mg2500", "MG2500 series", 0x176d, BJL_MODEL_MG2400, true);
-CANON_PIXMA(canon_mg2400_driver, "canon-mg2400", "MG2400 series", 0x176c, BJL_MODEL_MG2400, true);
-CANON_PIXMA(canon_p200_driver, "canon-p200", "P200 series", 0, BJL_MODEL_MG2400, false);
-CANON_PIXMA(canon_mg2900_driver, "canon-mg2900", "MG2900 series", 0x1780, BJL_MODEL_MG2900, true);
-CANON_PIXMA(canon_mg3000_driver, "canon-mg3000", "MG3000 series", 0x180b, BJL_MODEL_MG2900, true);
-CANON_PIXMA(canon_e470_driver, "canon-e470", "E470 series", 0x180c, BJL_MODEL_MG2900, true);
-CANON_PIXMA(canon_e460_driver, "canon-e460", "E460 series", 0x1788, BJL_MODEL_MG2900, true);
-CANON_PIXMA(canon_ip2800_driver, "canon-ip2800", "iP2800 series", 0, BJL_MODEL_IP2800, false);
-CANON_PIXMA(canon_e3100_driver, "canon-e3100", "E3100 series", 0x1828, BJL_MODEL_E3100, true);
-CANON_PIXMA(canon_ts3100_driver, "canon-ts3100", "TS3100 series", 0x1827, BJL_MODEL_E3100, true);
-CANON_PIXMA(canon_mp230_driver, "canon-mp230", "MP230 series", 0x175f, BJL_MODEL_MP230, true);
-CANON_PIXMA(canon_ip2700_driver, "canon-ip2700", "iP2700 series", 0, BJL_MODEL_IP2700, false);
-CANON_PIXMA(canon_mp250_driver, "canon-mp250", "MP250 series", 0x173a, BJL_MODEL_IP2700, true);
-CANON_PIXMA(canon_mp270_driver, "canon-mp270", "MP270 series", 0x173b, BJL_MODEL_IP2700, true);
-CANON_PIXMA(canon_mp280_driver, "canon-mp280", "MP280 series", 0x1746, BJL_MODEL_IP2700, true);
-CANON_PIXMA(canon_mp490_driver, "canon-mp490", "MP490 series", 0x173c, BJL_MODEL_IP2700, true);
-CANON_PIXMA(canon_mp493_driver, "canon-mp493", "MP493 series", 0x1757, BJL_MODEL_IP2700, true);
-CANON_PIXMA(canon_mp495_driver, "canon-mp495", "MP495 series", 0x1747, BJL_MODEL_IP2700, true);
-CANON_PIXMA(canon_mx340_driver, "canon-mx340", "MX340 series", 0x1741, BJL_MODEL_IP2700, true);
-CANON_PIXMA(canon_mx350_driver, "canon-mx350", "MX350 series", 0x1742, BJL_MODEL_IP2700, true);
-CANON_PIXMA(canon_mx360_driver, "canon-mx360", "MX360 series", 0x174d, BJL_MODEL_IP2700, true);
-CANON_PIXMA(canon_mx410_driver, "canon-mx410", "MX410 series", 0x174e, BJL_MODEL_IP2700, true);
-CANON_PIXMA(canon_mx420_driver, "canon-mx420", "MX420 series", 0x174f, BJL_MODEL_IP2700, true);
+CANON_PIXMA(canon_mg2500_driver, "canon-mg2500", "MG2500 series", 0x176d, BJL_MODEL_MG2400);
+CANON_PIXMA(canon_mg2400_driver, "canon-mg2400", "MG2400 series", 0x176c, BJL_MODEL_MG2400);
+CANON_PIXMA(canon_p200_driver, "canon-p200", "P200 series", 0, BJL_MODEL_MG2400);
+CANON_PIXMA(canon_mg2900_driver, "canon-mg2900", "MG2900 series", 0x1780, BJL_MODEL_MG2900);
+CANON_PIXMA(canon_mg3000_driver, "canon-mg3000", "MG3000 series", 0x180b, BJL_MODEL_MG2900);
+CANON_PIXMA(canon_e470_driver, "canon-e470", "E470 series", 0x180c, BJL_MODEL_MG2900);
+CANON_PIXMA(canon_e460_driver, "canon-e460", "E460 series", 0x1788, BJL_MODEL_MG2900);
+CANON_PIXMA(canon_ip2800_driver, "canon-ip2800", "iP2800 series", 0, BJL_MODEL_IP2800);
+CANON_PIXMA(canon_e3100_driver, "canon-e3100", "E3100 series", 0x1828, BJL_MODEL_E3100);
+CANON_PIXMA(canon_ts3100_driver, "canon-ts3100", "TS3100 series", 0x1827, BJL_MODEL_E3100);
+CANON_PIXMA(canon_mp230_driver, "canon-mp230", "MP230 series", 0x175f, BJL_MODEL_MP230);
+CANON_PIXMA(canon_ip2700_driver, "canon-ip2700", "iP2700 series", 0, BJL_MODEL_IP2700);
+CANON_PIXMA(canon_mp250_driver, "canon-mp250", "MP250 series", 0x173a, BJL_MODEL_IP2700);
+CANON_PIXMA(canon_mp270_driver, "canon-mp270", "MP270 series", 0x173b, BJL_MODEL_IP2700);
+CANON_PIXMA(canon_mp280_driver, "canon-mp280", "MP280 series", 0x1746, BJL_MODEL_IP2700);
+CANON_PIXMA(canon_mp490_driver, "canon-mp490", "MP490 series", 0x173c, BJL_MODEL_IP2700);
+CANON_PIXMA(canon_mp493_driver, "canon-mp493", "MP493 series", 0x1757, BJL_MODEL_IP2700);
+CANON_PIXMA(canon_mp495_driver, "canon-mp495", "MP495 series", 0x1747, BJL_MODEL_IP2700);
+CANON_PIXMA(canon_mx340_driver, "canon-mx340", "MX340 series", 0x1741, BJL_MODEL_IP2700);
+CANON_PIXMA(canon_mx350_driver, "canon-mx350", "MX350 series", 0x1742, BJL_MODEL_IP2700);
+CANON_PIXMA(canon_mx360_driver, "canon-mx360", "MX360 series", 0x174d, BJL_MODEL_IP2700);
+CANON_PIXMA(canon_mx410_driver, "canon-mx410", "MX410 series", 0x174e, BJL_MODEL_IP2700);
+CANON_PIXMA(canon_mx420_driver, "canon-mx420", "MX420 series", 0x174f, BJL_MODEL_IP2700);

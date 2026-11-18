@@ -11,7 +11,6 @@
 #include "esp_mac.h"
 #include "esp_timer.h"
 #include "events.h"
-#include "fake_scanner.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -19,7 +18,6 @@
 #include "mdns.h"
 #include "print_job.h"
 #include "printer_driver.h"
-#include "scan_service.h"
 #include "shared_buf.h"
 #include "status_led.h"
 #include "usb_printer.h"
@@ -42,19 +40,15 @@ static esp_timer_handle_t s_cancel_timer;
 static volatile bool s_job_running;
 
 // The shared buffer takes all the PSRAM but this much, left for everything
-// else (encoder strips, raster buffers, ...)
+// else (raster buffers, ...)
 #define PSRAM_RESERVE (512 * 1024)
 #define SHARED_BUF_MIN (1024 * 1024)
 
 // MODE=dev: no printer; jobs are converted, checksummed and kept in the
-// shared buffer. Scans come from the emulated scanner.
-#define DEV_SCANNER_RATE (800 * 1024)   // about what full-speed USB gives
+// shared buffer.
 static uint8_t *s_cap;
 static size_t s_cap_size, s_cap_len;
 static bool s_cap_truncated;
-static volatile bool s_dev_scanning;
-static fake_scanner_t s_fake_scanner;
-static scan_config_t s_scan_cfg;
 static uint32_t s_dev_crc;
 static int64_t s_dev_t0;
 
@@ -72,10 +66,7 @@ static void get_status(void *ctx, airprint_status_t *st)
     st->connected = usb_printer_connected();
     if (!st->connected)
         return;
-    st->busy = usb_printer_job_active() && !s_job_running;     // local test page or scan
-    bool scanning = usb_scanner_active();
-    if (scanning)
-        snprintf(st->message, sizeof(st->message), "Scanning");
+    st->busy = usb_printer_job_active() && !s_job_running;     // local test page
 
     // the printer's own status (reasons, message, ink) as its driver reads it
     usb_printer_status_t cs;
@@ -86,7 +77,7 @@ static void get_status(void *ctx, airprint_status_t *st)
     const char *d = have ? cs.detail : "";
     // USB printer class port status: paper empty
     uint8_t port = 0;
-    if (!s_job_running && !scanning && usb_printer_port_status(&port) == ESP_OK && (port & 0x20) &&
+    if (!s_job_running && usb_printer_port_status(&port) == ESP_OK && (port & 0x20) &&
         !strstr(d, "MediaEmpty")) {
         add_reason(st, "media-empty-error");
         snprintf(st->message, sizeof(st->message), "Out of paper");
@@ -118,7 +109,7 @@ static int job_sync(void *ctx, const char *what)
 }
 
 // The job's big buffer for two-sided printing (the held front side): the shared PSRAM buffer, taken
-// when a driver first asks and given back when the job ends. NULL while a scan has it.
+// when a driver first asks and given back when the job ends.
 static uint8_t *s_job_big;
 static size_t s_job_big_size;
 static bool s_job_big_taken;
@@ -213,7 +204,7 @@ static void dev_get_status(void *ctx, airprint_status_t *st)
 
 static int dev_job_open(void *ctx)
 {
-    if (s_job_running || s_dev_scanning)
+    if (s_job_running)
         return -1;
     s_cap = sbuf_acquire(SBUF_PRINT, &s_cap_size);     // NULL: CRC only
     s_cap_len = 0;
@@ -265,7 +256,7 @@ static void dev_job_close(void *ctx, bool ok)
 
 static bool web_http(airprint_http_t *h, const char *method, const char *path)
 {
-    return scan_service_http(h, method, path) || events_http(h, method, path) || webui_http(h, method, path);
+    return events_http(h, method, path) || webui_http(h, method, path);
 }
 
 static bool dev_http(void *ctx, airprint_http_t *h, const char *method, const char *path)
@@ -281,74 +272,12 @@ static bool dev_http(void *ctx, airprint_http_t *h, const char *method, const ch
     return true;
 }
 
-static bool dev_scan_available(void *ctx)
-{
-    return true;
-}
-
-static int dev_scan_open(void *ctx)
-{
-    if (s_job_running)
-        return -1;
-    s_dev_scanning = true;
-    return 0;
-}
-
-static void dev_scan_close(void *ctx)
-{
-    if (s_fake_scanner.errors)
-        ESP_LOGW(TAG, "emulated scanner: %d protocol violations, first: %s", s_fake_scanner.errors,
-                 s_fake_scanner.error);
-    s_dev_scanning = false;
-}
-
-// ---------------------------------------------------------------------------
-// scanner
-
-static bool scan_available(void *ctx)
-{
-    return print_job_driver()->scanner && usb_scanner_present();
-}
-
-static int scan_open(void *ctx)
-{
-    esp_err_t err = usb_scanner_begin();
-    if (err != ESP_OK)
-        ESP_LOGW(TAG, "scanner not available: %s", esp_err_to_name(err));
-    return err == ESP_OK ? 0 : -1;
-}
-
-static void scan_close(void *ctx)
-{
-    usb_scanner_end();
-}
-
-static int scan_io_result(int r)
-{
-    return r >= 0 ? r : r == USB_SCAN_TIMEOUT ? PIXMA_ETIMEDOUT : PIXMA_EIO;
-}
-
-static int scan_write(void *ctx, const uint8_t *data, size_t len, int timeout_ms)
-{
-    return scan_io_result(usb_scanner_write(data, len, (uint32_t)timeout_ms));
-}
-
-static int scan_read(void *ctx, uint8_t *buf, size_t len, int timeout_ms)
-{
-    return scan_io_result(usb_scanner_read(buf, len, (uint32_t)timeout_ms));
-}
-
-static void scan_sleep(void *ctx, int ms)
-{
-    vTaskDelay(pdMS_TO_TICKS(ms));
-}
-
 static bool http_handler(void *ctx, airprint_http_t *h, const char *method, const char *path)
 {
     return web_http(h, method, path);
 }
 
-// Most of the PSRAM, for scans (and the dev mode print capture)
+// Most of the PSRAM, for two-sided printing (and the dev mode print capture)
 static void alloc_shared_buf(void)
 {
     size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
@@ -359,12 +288,12 @@ static void alloc_shared_buf(void)
         ESP_LOGI(TAG, "shared buffer: %u KB of PSRAM (%u KB PSRAM left)", (unsigned)(size / 1024),
                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     else
-        ESP_LOGW(TAG, "no PSRAM for the shared buffer: scanning disabled");
+        ESP_LOGW(TAG, "no PSRAM for the shared buffer: no two-sided printing");
 }
 
 // ---------------------------------------------------------------------------
 
-// The printer and scanner services of the current driver
+// The printer service of the current driver
 static esp_err_t announce(const char *hostname)
 {
     esp_err_t err;
@@ -397,7 +326,7 @@ static esp_err_t announce(const char *hostname)
         {"Transparent", "T"},
         {"Binary", "T"},
         {"TBCP", "F"},
-        {"Scan", drv->scanner ? "T" : "F"},    // the eSCL scanner below, same UUID
+        {"Scan", "F"},
         {"Fax", "F"},
     };
     err = mdns_service_add(PRINTER_NAME, "_ipp", "_tcp", IPP_PORT, txt, sizeof(txt) / sizeof(txt[0]));
@@ -407,30 +336,6 @@ static esp_err_t announce(const char *hostname)
     mdns_service_subtype_add_for_host(PRINTER_NAME, "_ipp", "_tcp", NULL, "_universal");
     mdns_service_subtype_add_for_host(PRINTER_NAME, "_ipp", "_tcp", NULL, "_print");
 
-    if (!drv->scanner) {
-        ESP_LOGI(TAG, "announced \"%s\" as %s.local:%d", PRINTER_NAME, hostname, IPP_PORT);
-        return ESP_OK;
-    }
-    // eSCL scanner (AirScan): macOS Image Capture / Preview, sane-airscan, Windows
-    char icon[96];
-    snprintf(icon, sizeof(icon), "http://%s.local/icon.png", hostname);
-    mdns_txt_item_t scan_txt[] = {
-        {"txtvers", "1"},
-        {"vers", "2.0"},
-        {"rs", "eSCL"},
-        {"ty", s_cfg.make_model},
-        {"note", ""},
-        {"pdl", "image/jpeg"},
-        {"cs", "color"},
-        {"is", "platen"},
-        {"duplex", "F"},
-        {"UUID", s_uuid},
-        {"adminurl", adminurl},
-        {"representation", icon},
-    };
-    err = mdns_service_add(PRINTER_NAME, "_uscan", "_tcp", WEB_PORT, scan_txt, sizeof(scan_txt) / sizeof(scan_txt[0]));
-    if (err != ESP_OK)
-        ESP_LOGW(TAG, "cannot announce the scanner: %s", esp_err_to_name(err));
     ESP_LOGI(TAG, "announced \"%s\" as %s.local:%d", PRINTER_NAME, hostname, IPP_PORT);
     return ESP_OK;
 }
@@ -456,7 +361,6 @@ static void set_identity(const printer_driver_t *drv)
     s_device_id_cur = i;
     s_cfg.device_id = s_device_id[i];
     s_cfg.make_model = drv->make_model;
-    s_scan_cfg.make_model = drv->make_model;
     s_cfg.driver = drv;
 }
 
@@ -509,19 +413,10 @@ esp_err_t airprint_esp_start(const char *hostname, void (*on_job_state)(bool pri
         .identify = identify,
     };
     alloc_shared_buf();
-    s_scan_cfg = (scan_config_t){
-        .available = scan_available,
-        .open = scan_open,
-        .close = scan_close,
-        .io = {.write = scan_write, .read = scan_read, .sleep_ms = scan_sleep},
-        .state = job_state,
-        .uuid = s_uuid,
-    };
     set_identity(drv);
     s_cfg.http_handler = http_handler;
-    s_cfg.home_html = SCAN_HOME_HTML;
     if (strcmp(MODE, "dev") == 0) {
-        ESP_LOGW(TAG, "MODE=dev: AirPrint jobs are converted but NOT printed, scans come from an emulated scanner");
+        ESP_LOGW(TAG, "MODE=dev: AirPrint jobs are converted but NOT printed");
         s_cfg.get_status = dev_get_status;
         s_cfg.job_open = dev_job_open;
         s_cfg.job_write = dev_job_write;
@@ -533,17 +428,9 @@ esp_err_t airprint_esp_start(const char *hostname, void (*on_job_state)(bool pri
         s_cfg.job_close = dev_job_close;
         s_cfg.job_cancel = NULL;
         s_cfg.http_handler = dev_http;
-        if (fake_scanner_init(&s_fake_scanner, DEV_SCANNER_RATE) == 0) {
-            s_scan_cfg.available = dev_scan_available;
-            s_scan_cfg.open = dev_scan_open;
-            s_scan_cfg.close = dev_scan_close;
-            s_scan_cfg.io = fake_scanner_io(&s_fake_scanner);
-        }
     }
-    scan_service_init(&s_scan_cfg);
     // live state for the web UI (GET /events)
     events_add_source("printer", airprint_status_json, NULL);
-    events_add_source("scan", scan_service_status_json, NULL);
     if (airprint_start(&s_cfg) != 0 || events_start() != 0)
         return ESP_FAIL;
     esp_err_t err = start_mdns(hostname);

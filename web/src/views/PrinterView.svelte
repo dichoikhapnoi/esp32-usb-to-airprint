@@ -20,7 +20,6 @@
     if (!p.connected) return { text: 'Not connected', tone: 'warn' };
     if (p.reasons.some((r) => r.endsWith('-error'))) return { text: p.message, tone: 'err' };
     if (p.state === 'processing') return { text: 'Printing', tone: 'busy' };
-    if (device.scan?.state === 'scanning') return { text: 'Scanning', tone: 'busy' };
     return { text: 'Ready', tone: 'ok' };
   });
 
@@ -192,7 +191,7 @@
     <h2>Other ways to print</h2>
     <p class="muted small">
       iPhone, iPad and Mac: AirPrint (Share → Print). Android: the default print service. The button on the printer
-      box scans a page into Files; press it twice for a test page, hold it to cancel.
+      box: press it twice for a test page, hold it to cancel.
     </p>
   </section>
 </div>

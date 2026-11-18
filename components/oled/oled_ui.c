@@ -173,40 +173,6 @@ static void wifi_icon(uint8_t *fb, int right, int y, bool connected, int rssi)
     }
 }
 
-static const char *paper_label(const char *paper)
-{
-    if (!paper)
-        return "";
-    if (!strcmp(paper, "a4"))
-        return "A4";
-    if (!strcmp(paper, "letter"))
-        return "Letter";
-    if (!strcmp(paper, "card"))
-        return "ID card";
-    return "Area";
-}
-
-static const char *source_label(const char *source)
-{
-    if (!source)
-        return "";
-    if (!strcmp(source, "button"))
-        return "button";
-    if (!strcmp(source, "escl"))
-        return "AirScan";
-    if (!strcmp(source, "web") || !strcmp(source, "stream"))
-        return "web";
-    return source;
-}
-
-static void format_size(char *out, size_t n, unsigned long bytes)
-{
-    if (bytes >= 1024 * 1024)
-        snprintf(out, n, "%lu.%lu MB", bytes / (1024 * 1024), bytes % (1024 * 1024) * 10 / (1024 * 1024));
-    else
-        snprintf(out, n, "%lu KB", (bytes + 1023) / 1024);
-}
-
 static bool has_reason(const airprint_status_t *st, const char *reason)
 {
     for (int i = 0; i < st->nreasons; i++)
@@ -274,40 +240,6 @@ static bool recent(long ended_ago)
     return ended_ago >= 0 && ended_ago < OLED_RESULT_S;
 }
 
-static void scan_settings(char *out, size_t n, const scan_info_t *sc)
-{
-    snprintf(out, n, "%s %d dpi", paper_label(sc->paper), sc->dpi);
-}
-
-static void render_scan(uint8_t *fb, const scan_info_t *sc)
-{
-    char buf[48];
-    scan_settings(buf, sizeof(buf), sc);
-    if (is(sc->state, "scanning")) {
-        headline(fb, "SCANNING");
-        oled_text(fb, 0, Y_LINE1, buf, 1);
-        text_right(fb, OLED_WIDTH - 1, Y_LINE1, source_label(sc->source));
-        if (sc->lines <= 0 || sc->height <= 0)
-            line(fb, Y_LINE2, "Warming up...");
-        else
-            progress(fb, 0, Y_LINE2, (int)(100LL * sc->lines / sc->height));
-    } else if (is(sc->state, "done")) {
-        headline(fb, "SCANNED");
-        line(fb, Y_LINE1, buf);
-        char size[16];
-        format_size(size, sizeof(size), sc->bytes);
-        snprintf(buf, sizeof(buf), "%s JPEG", size);
-        line(fb, Y_LINE2, buf);
-    } else if (is(sc->state, "canceled")) {
-        headline(fb, "CANCELED");
-        line(fb, Y_LINE1, "Scan canceled");
-    } else {
-        headline(fb, "FAILED");
-        line(fb, Y_LINE1, "Scan failed:");
-        line(fb, Y_LINE2, sc->error[0] ? sc->error : "unknown error");
-    }
-}
-
 static void render_job(uint8_t *fb, const airprint_activity_t *pa)
 {
     char buf[32];
@@ -342,7 +274,6 @@ void oled_ui_render(const oled_state_t *st, uint8_t *fb)
 {
     oled_clear(fb);
     const airprint_activity_t *pa = &st->print;
-    const scan_info_t *sc = &st->scan;
 
     // network
     text_fit(fb, 0, Y_NAME, st->name ? st->name : "", OLED_WIDTH - 20);
@@ -354,16 +285,11 @@ void oled_ui_render(const oled_state_t *st, uint8_t *fb)
     // what the device does, most important first
     bool job_running = is(pa->job.state, "pending") || is(pa->job.state, "processing");
     bool job_recent = pa->job.id && recent(pa->job.ended_ago);
-    bool scan_recent = sc->state && !is(sc->state, "idle") && recent(sc->ended_ago);
-    if (is(sc->state, "scanning")) {
-        render_scan(fb, sc);
-    } else if (job_running) {
+    if (job_running) {
         render_job(fb, pa);
     } else if (pa->status.busy) {
         headline(fb, "PRINTING");       // the button's test page
         line(fb, Y_LINE1, "Test page");
-    } else if (scan_recent && (!job_recent || sc->ended_ago <= pa->job.ended_ago)) {
-        render_scan(fb, sc);
     } else if (job_recent) {
         render_job(fb, pa);
     } else if (!pa->status.connected) {
@@ -373,7 +299,7 @@ void oled_ui_render(const oled_state_t *st, uint8_t *fb)
     } else {
         const char *p = problem(&pa->status);
         headline(fb, p ? p : "READY");
-        line(fb, Y_LINE1, pa->status.message[0] ? pa->status.message : "Press BOOT to scan");
+        line(fb, Y_LINE1, pa->status.message[0] ? pa->status.message : "Ready to print");
         ink_levels(fb, Y_LINE2, &pa->status);
     }
 }

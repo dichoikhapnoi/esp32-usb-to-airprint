@@ -1,13 +1,11 @@
 <script lang="ts">
   import Printer from '@lucide/svelte/icons/printer';
-  import ScanLine from '@lucide/svelte/icons/scan-line';
   import FolderOpen from '@lucide/svelte/icons/folder-open';
   import Layers from '@lucide/svelte/icons/layers';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import { device } from '../lib/device.svelte';
   import { files } from '../lib/files.svelte';
   import { work } from '../lib/process.svelte';
-  import { scanProgress } from '../lib/scan.svelte';
 
   let { current, home }: { current: string; home: boolean } = $props();
 
@@ -18,29 +16,19 @@
     if (!p.connected) return 'Printer not connected';
     const job = p.jobs.find((j) => j.id === p.active);
     if (job && job.state === 'processing') return `Printing · page ${job.pages + 1}`;
-    if (device.scan?.state === 'scanning') return 'Busy scanning';
     const low = p.supplies.find((s) => s.level >= 0 && s.level <= 10);
     if (p.reasons.some((r) => r.endsWith('-error'))) return p.message;
     return low ? `Ready · ${low.name} ink low` : 'Ready';
   });
 
-  const scanLine = $derived.by(() => {
-    const s = device.scan;
-    if (!device.loaded) return 'Connecting…';
-    if (!s || !s.scanner) return 'No scanner';
-    if (s.state === 'scanning') return s.lines ? `Scanning · ${Math.round(scanProgress(s) * 100)}%` : 'Warming up…';
-    return 'Ready';
-  });
-
   const items = $derived([
     { id: 'printer', label: 'Printer', icon: Printer, line: printerLine, desc: 'Status, ink and print jobs' },
-    { id: 'scanner', label: 'Scanner', icon: ScanLine, line: scanLine, desc: 'Scan documents and photos' },
     {
       id: 'files',
       label: 'Files',
       icon: FolderOpen,
       line: files.loaded ? `${files.list.length} file${files.list.length === 1 ? '' : 's'}` : '…',
-      desc: 'Scans and uploads: print or download',
+      desc: 'Uploads: print or download',
     },
     {
       id: 'process',
@@ -55,7 +43,7 @@
     const p = device.printer;
     if (!device.online) return 'err';
     if (!p?.connected) return 'warn';
-    if (p.state === 'processing' || device.scan?.state === 'scanning') return 'busy';
+    if (p.state === 'processing') return 'busy';
     return 'ok';
   });
 </script>

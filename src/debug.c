@@ -426,7 +426,7 @@ static const char *check_image(const uint8_t *p, size_t n)
 static esp_err_t ota_post(httpd_req_t *req)
 {
     if (s_busy && s_busy())
-        return send_text(req, "409 Conflict", "busy printing or scanning, try again later\n");
+        return send_text(req, "409 Conflict", "busy printing, try again later\n");
     const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
     size_t total = req->content_len;
     if (!part)

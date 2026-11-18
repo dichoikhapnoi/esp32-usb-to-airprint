@@ -1,8 +1,7 @@
 // Self test for the emulated ESP32-S3 (`pio run -e qemu`, tools/qemu_selftest.sh):
 //  1. dry-run test page jobs, logging the stream CRC per mode
 //  2. the AirPrint/IPP server on QEMU's emulated Ethernet (OpenEth), with a
-//     fake printer that logs the CRC of every job it receives, and the scan
-//     service with the emulated scanner
+//     fake printer that logs the CRC of every job it receives
 //  3. the debug server (log, info, OTA updates with rollback), as in MODE=debug
 // QEMU has no USB OTG controller, WiFi or WS2812, so those are left out.
 #ifdef PRINTSERVER_QEMU_SELFTEST
@@ -22,17 +21,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "fake_scanner.h"
 #include "oled.h"
 #include "print_job.h"
-#include "scan_service.h"
-#include "shared_buf.h"
 #include "webui.h"
-
-// No PSRAM in QEMU: a small buffer in internal RAM (a bigger one starves the
-// network during the 600 dpi print test). Streams wrap it many times; a kept
-// scan does not fit and must fail cleanly.
-#define SCAN_BUF_SIZE (48 * 1024)
 
 static const char *TAG = "selftest";
 
@@ -98,24 +89,9 @@ static void job_close(void *ctx, bool ok)
              (unsigned long)esp_get_minimum_free_heap_size());
 }
 
-// emulated scanner, as fast as it goes
-static fake_scanner_t s_scanner;
-
-static int scan_open(void *ctx)
-{
-    return 0;
-}
-
-static void scan_close(void *ctx)
-{
-    ESP_LOGI(TAG, "QEMU_SCAN violations=%d stack_free_min=%u heap_min=%lu %s", s_scanner.errors,
-             (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned long)esp_get_minimum_free_heap_size(),
-             s_scanner.error);
-}
-
 static bool http_handler(void *ctx, airprint_http_t *h, const char *method, const char *path)
 {
-    return scan_service_http(h, method, path) || events_http(h, method, path) || webui_http(h, method, path);
+    return events_http(h, method, path) || webui_http(h, method, path);
 }
 
 static bool net_up(void)
@@ -150,14 +126,6 @@ void app_main(void)
         ESP_LOGE(TAG, "no IP address");
         return;
     }
-    fake_scanner_init(&s_scanner, 0);
-    sbuf_init(heap_caps_malloc(SCAN_BUF_SIZE, MALLOC_CAP_8BIT), SCAN_BUF_SIZE);
-    ESP_LOGI(TAG, "shared buffer %s, free heap %lu (largest block %u)", sbuf_size() ? "allocated" : "MISSING",
-             (unsigned long)esp_get_free_heap_size(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    static scan_config_t scfg = {.open = scan_open, .close = scan_close, .make_model = "Canon MG2500 series",
-                                 .uuid = "a4d1e9b2-0b6f-4c3e-9d2a-000000000000"};
-    scfg.io = fake_scanner_io(&s_scanner);
-    scan_service_init(&scfg);
     static airprint_config_t cfg = {
         .name = "Canon MG2500 (QEMU)",
         .make_model = "Canon MG2500 series",
@@ -170,11 +138,9 @@ void app_main(void)
         .job_write = job_write,
         .job_close = job_close,
         .http_handler = http_handler,
-        .home_html = SCAN_HOME_HTML,
     };
     cfg.driver = drv;
     events_add_source("printer", airprint_status_json, NULL);
-    events_add_source("scan", scan_service_status_json, NULL);
     airprint_start(&cfg);
     events_start();
     debug_server_start(NULL);

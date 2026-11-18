@@ -1,7 +1,7 @@
-// One large buffer (most of the PSRAM on the ESP32) shared by jobs that never
-// run at the same time: scans, and the print capture of dev mode. A user
-// takes it for writing, which drops the previous content; what it leaves
-// behind stays readable (e.g. the last scan) until the next user takes it.
+// One large buffer (most of the PSRAM on the ESP32) for jobs that never run at
+// the same time: the held sides of two-sided printing, and the print capture
+// of dev mode. A user takes it for writing, which drops the previous content;
+// what it leaves behind stays readable until the next user takes it.
 #pragma once
 
 #include <stdbool.h>
@@ -14,7 +14,6 @@ extern "C" {
 
 typedef enum {
     SBUF_NONE = 0,
-    SBUF_SCAN,
     SBUF_PRINT,
 } sbuf_user_t;
 

@@ -113,6 +113,9 @@ void capt_hex(const char *what, const uint8_t *p, size_t n);
 // removes every override. Used by the debug server (POST /capt).
 void canon_capt_set_override(int offset, int value);
 
+// 1 while the running (or last given-up) job waits for paper: the status hook shows "Out of paper".
+int canon_capt_paper_out(void);
+
 #ifdef __cplusplus
 }
 #endif

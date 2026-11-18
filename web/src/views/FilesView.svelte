@@ -26,7 +26,7 @@
   import { addFilesToWork, exportPdf, pageItems } from '../lib/process.svelte';
   import { go, openPrint, openViewer, toast } from '../lib/ui.svelte';
 
-  let filter = $state<'all' | 'scan' | 'upload' | 'process'>('all');
+  let filter = $state<'all' | 'upload' | 'process'>('all');
   let menu = $state('');
   let uploading = $state(0);
   let dragging = $state(false);
@@ -210,7 +210,7 @@
   </div>
 
   <div class="seg filters">
-    {#each [['all', 'All'], ['scan', 'Scans'], ['upload', 'Uploads'], ['process', 'Made here']] as [k, label]}
+    {#each [['all', 'All'], ['upload', 'Uploads'], ['process', 'Made here']] as [k, label]}
       <button class:on={filter === k} onclick={() => (filter = k as typeof filter)}>{label}</button>
     {/each}
   </div>
@@ -222,7 +222,7 @@
       <Inbox size={40} strokeWidth={1.4} />
       <div>
         <b>No files yet</b>
-        <p class="small">Upload PDFs or pictures (or drop them here), or scan a page: it shows up here.</p>
+        <p class="small">Upload PDFs or pictures (or drop them here): they show up here.</p>
       </div>
       <button class="btn" onclick={() => input.click()}><Upload size={17} /> Upload</button>
     </div>

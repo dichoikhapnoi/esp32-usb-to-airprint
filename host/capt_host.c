@@ -60,8 +60,14 @@ typedef struct {
 
     // printer state
     int uninit;                 // START_1..3 not done yet
+    int offline_after;          // test: the printer goes offline after firing this many pages (0: never)
+    unsigned stale_job;         // test: a job of an earlier session is still open under this id (0: none)
+    int offline_paper;          // test: ... with the paper out for this many status polls
+    int offline;                // gone offline: decodes nothing until START_1..3 and UPLOAD_2; its counters restart
+    int restarts;               // times it was brought back
     int busy_polls;             // status polls that still say busy
     int full_polls;             // status polls that still say "buffer full"
+    int nopaper_polls;          // status polls that still say "out of paper" (both bits)
     uint16_t pages_started, page_received, page_out;
     int job_open;
     uint16_t job_id;
@@ -69,7 +75,7 @@ typedef struct {
     int source_selected;        // E1A9 answered for the page being set up
     unsigned sel_w, sel_h, sel_sz;
     int offline_cmds;           // E0A6 seen
-    unsigned line_bytes, lines, page_w;
+    unsigned line_bytes, lines, page_w, left;
     unsigned fg_seen[8];        // job start flags (1,2,4,6) seen
     int cmd_counts[0x10000 / 256];
     long xstatus_extra;         // bytes added to the extended status reply
@@ -81,7 +87,7 @@ typedef struct {
     unsigned rows;
     struct {
         uint8_t *bits;
-        unsigned rows, line_bytes, page_w;
+        unsigned rows, line_bytes, page_w, left;
         int ended;
         unsigned flag;          // byte 5 of the page parameters: 0 one-sided, 2 front, 4 back
     } page[SIM_MAX_PAGES];
@@ -129,6 +135,8 @@ static void status_reply(sim_t *s, uint16_t cmd, size_t extra)
     unsigned st0 = 0;
     if (s->uninit)
         st0 |= 1u << 5;
+    if (s->offline)
+        st0 |= (1u << 4) | (1u << 1);
     if (s->busy_polls > 0) {
         st0 |= 1u << 7;
         s->busy_polls--;
@@ -137,8 +145,16 @@ static void status_reply(sim_t *s, uint16_t cmd, size_t extra)
         st0 |= 1u << 2;
         s->full_polls--;
     }
+    unsigned st1 = 0;
+    if (s->nopaper_polls > 0) {
+        st0 |= 1u << 1;
+        st1 |= 1u << 14;
+        s->nopaper_polls--;
+    }
     p[0] = (uint8_t)st0;
     p[1] = (uint8_t)(st0 >> 8);
+    p[8] = (uint8_t)st1;
+    p[9] = (uint8_t)(st1 >> 8);
     // pages the printer has started / is printing / has ejected / has finished
     uint16_t dec = s->pages_started, out = s->sheets_done, prt = s->fired;     // a two-sided sheet counts once
     p[14] = (uint8_t)dec, p[15] = (uint8_t)(dec >> 8);
@@ -184,6 +200,7 @@ static void do_set_parms(sim_t *s, const uint8_t *d, size_t n)
                 s->line_bytes = W(p + 26);
                 s->lines = W(p + 28);
                 s->page_w = W(p + 30);
+                s->left = W(p + 22);
                 if (p[2] != 0x94 || p[3] != 0x2A)
                     sim_error(s, "model key %02X %02X", p[2], p[3]);
                 s->cur_flag = p[5];
@@ -191,8 +208,10 @@ static void do_set_parms(sim_t *s, const uint8_t *d, size_t n)
                     sim_error(s, "page flag %02X", p[5]);
                 if (!s->source_selected || p[6] != 1)
                     sim_error(s, "paper source %u in the page parameters, selected %d", p[6], s->source_selected);
-                if (W(p + 22) != 120 || W(p + 24) != 120)
-                    sim_error(s, "margins %u/%u", W(p + 22), W(p + 24));
+                if (W(p + 24) != 120 || W(p + 22) < 20 || W(p + 22) > 520 ||
+                    W(p + 22) + 8 * W(p + 26) > W(p + 30) - 8)
+                    sim_error(s, "margins %u/%u, window %u bytes on a page %u wide", W(p + 22), W(p + 24), W(p + 26),
+                              W(p + 30));
                 if (s->sel_w != W(p + 30) / 2 || s->sel_h != W(p + 32) / 2 || s->sel_sz != p[4])
                     sim_error(s, "E1A9 said %ux%u size %u, the page is %ux%u size %u", s->sel_w, s->sel_h, s->sel_sz,
                               W(p + 30), W(p + 32), p[4]);
@@ -264,6 +283,10 @@ static void do_command(sim_t *s, uint16_t cmd, const uint8_t *d, size_t n)
     case 0xA2A0: {  // JOB_BEGIN
         if (n != 8)
             sim_error(s, "JOB_BEGIN data is %zu bytes", n);
+        if (s->stale_job) {
+            reply(s, cmd, (const uint8_t[]){0x87, 0, 0, 0, 0, 0, 0, 0}, 8);
+            break;
+        }
         if (s->job_open)
             sim_error(s, "JOB_BEGIN inside a job");
         s->job_open = 1;
@@ -295,6 +318,8 @@ static void do_command(sim_t *s, uint16_t cmd, const uint8_t *d, size_t n)
         reply(s, cmd, d, n);
         break;
     case 0xE1A9: {  // select the paper source
+        if (s->offline)
+            sim_error(s, "a page was started while the printer is offline (it decodes nothing)");
         if (n != 8) {
             sim_error(s, "E1A9 data is %zu bytes", n);
             break;
@@ -306,6 +331,12 @@ static void do_command(sim_t *s, uint16_t cmd, const uint8_t *d, size_t n)
             sim_error(s, "E1A9 media %u source %u flag %u", d[1], d[6], d[7]);
         s->source_selected = 1;
         reply(s, cmd, (const uint8_t[]){0x00, 0x01}, 2);
+        break;
+    }
+    case 0xA0A1: {  // paper sources (asked while the paper is out)
+        uint8_t src[24] = {0};
+        src[18 - 4] = 0xA2;
+        reply(s, cmd, src, sizeof(src));
         break;
     }
     case 0xE0A0:    // CHKSTATUS
@@ -326,6 +357,15 @@ static void do_command(sim_t *s, uint16_t cmd, const uint8_t *d, size_t n)
     case 0xE0A5:    // UPLOAD_2
         if (n != 16)
             sim_error(s, "UPLOAD_2 data is %zu bytes", n);
+        if (s->offline && s->nopaper_polls > 0)
+            sim_error(s, "restarted while the paper is out (that only clears the flag)");
+        if (s->offline) {
+            s->offline = 0;
+            s->restarts++;
+            s->pages_started = s->page_received = s->page_out = 0;
+            s->fired = s->sheets_done = 0;
+            s->offline_after = 0;
+        }
         reply(s, cmd, (const uint8_t[]){0, 0}, 2);
         s->busy_polls = 1;
         break;
@@ -364,6 +404,7 @@ static void do_command(sim_t *s, uint16_t cmd, const uint8_t *d, size_t n)
             s->page[s->npages].rows = s->rows;
             s->page[s->npages].line_bytes = s->line_bytes;
             s->page[s->npages].page_w = s->page_w;
+            s->page[s->npages].left = s->left;
             s->page[s->npages].ended = 1;
             s->page[s->npages].flag = s->cur_flag;
             s->npages++;
@@ -379,11 +420,22 @@ static void do_command(sim_t *s, uint16_t cmd, const uint8_t *d, size_t n)
         reply(s, cmd, d, n);
         s->page_out = s->pages_started;
         s->fired++;
+        if (s->offline_after && s->fired == s->offline_after) {
+            s->offline = 1;
+            s->nopaper_polls = s->offline_paper;
+        }
         if (s->npages && s->page[s->npages - 1].flag != 4)
             s->sheets_done++;
         break;
     }
     case 0xE0A9:    // JOB_END
+        if (s->stale_job) {     // not the job's owner: refused, except for the open job of the earlier session
+            int ours = n == 2 && W(d) == s->stale_job;
+            if (ours)
+                s->stale_job = 0;
+            reply(s, cmd, ours ? (const uint8_t[]){0, 0} : (const uint8_t[]){0x88, 0}, 2);
+            break;
+        }
         if (!s->job_open)
             sim_error(s, "JOB_END without a job");
         if (n != 2 || W(d) != s->job_id)
@@ -644,7 +696,8 @@ static int page_bit(const sim_t *s, int pg, unsigned x, unsigned y)
 static long compare_page(const sim_t *s, int pg, int dpi, int paper, pixel_fn f, int src_w, int src_h)
 {
     unsigned lb = s->page[pg].line_bytes;
-    unsigned left = 120, top = 120;                         // 600 dpi px: the image starts 5 mm inside
+    unsigned left = 120, top = 120;     // 600 dpi px: the page column and row the window shows first. Not the
+                                        // window's margin: moving that must move the image on the paper
     int scale = 600 / dpi;
     long bad = 0;
     for (unsigned y = 0; y < s->page[pg].rows; y++) {
@@ -722,13 +775,13 @@ static long compare_page_rot(const sim_t *s, int pg, int dpi, int paper, pixel_f
 {
     unsigned lb = s->page[pg].line_bytes, lines = s->page[pg].rows;
     unsigned page_w = paper == 0 ? 4960 : 5100, page_h = paper == 0 ? 7014 : 6600;
-    unsigned left = 120, top = 120;
+    unsigned left = 120, top = 120;     // as in compare_page: independent of the window's margin
     int scale = 600 / dpi;
     long bad = 0;
     for (unsigned y = 0; y < lines; y++) {
         for (unsigned x = 0; x < lb * 8; x++) {
             unsigned X = page_w - 1 - (left + x), Y = page_h - 1 - (top + y);       // the page pixel (600 dpi)
-            int inside = X >= left && X < left + lb * 8 && Y >= top && Y < top + lines;
+            int inside = Y >= top && Y < top + lines;       // the window shows the turned page's columns whole
             int sx = (int)(X / (unsigned)scale), sy = (int)(Y / (unsigned)scale);
             int want = inside && sy < src_h && sx < src_w && f(sx, sy, src_w, src_h) == 0;
             if (page_bit(s, pg, x, y) != want)
@@ -765,6 +818,11 @@ static void test_duplex(const printer_driver_t *d)
                 long turned = compare_page_rot(&s, 0, dpi, 0, pat_stripes, w, h);
                 CHECK(plain == 0 || turned == 0, "%s: back neither as is (%ld) nor turned (%ld)", what, plain, turned);
                 CHECK(plain != 0 || turned != 0, "%s: the pattern is the same turned", what);
+                // each side's window is moved by the measured offset of the printer (FRONT_SHIFT_PX, BACK_SHIFT_PX)
+                CHECK(s.page[1].left == 308 && s.page[0].left == 120, "%s: window starts %u (front), %u (back), want 308, 120",
+                      what, s.page[1].left, s.page[0].left);
+                CHECK(s.page[1].line_bytes == 580 && s.page[0].line_bytes == 592, "%s: window bytes %u (front), %u (back)",
+                      what, s.page[1].line_bytes, s.page[0].line_bytes);
             }
             CHECK(s.fg_seen[2] == 2, "%s: two pages fired", what);
             sim_free(&s);
@@ -786,6 +844,27 @@ static void test_duplex(const printer_driver_t *d)
         sim_free(&s);
     }
     canon_capt_set_override(0, -1);
+
+    // the window shifts can be changed (debug override 43 / 44, signed, units of 4 px)
+    {
+        canon_capt_set_override(43, 0);
+        canon_capt_set_override(44, 0xF6);          // -10 -> -40 px
+        sim_t s;
+        sim_init(&s);
+        run_t r = run_duplex(d, &s, 300, 0, 1, 2, pat_rect, pat_stripes);
+        expect_clean(&s, "window override");
+        CHECK(!r.job_rc && s.npages == 2, "window override: rc");
+        if (s.npages == 2) {
+            CHECK(s.page[1].left == 120 && s.page[1].line_bytes == 592, "window override: front %u/%u", s.page[1].left,
+                  s.page[1].line_bytes);
+            CHECK(s.page[0].left == 80 && s.page[0].line_bytes == 592, "window override: back %u/%u", s.page[0].left,
+                  s.page[0].line_bytes);
+            CHECK(compare_page(&s, 1, 300, 0, pat_rect, 2480, 3507) == 0, "window override: front pixels");
+            CHECK(compare_page_rot(&s, 0, 300, 0, pat_stripes, 2480, 3507) == 0, "window override: back pixels");
+        }
+        sim_free(&s);
+        canon_capt_set_override(0, -1);
+    }
 
     // three sides: the last one has no back and is printed one-sided
     {
@@ -842,7 +921,7 @@ static void test_driver(void)
     CHECK(d != NULL, "canon-lbp3300 driver not registered");
     if (!d)
         return;
-    CHECK(d->raw_io && !d->color && !d->scanner, "driver flags");
+    CHECK(d->raw_io && !d->color, "driver flags");
     CHECK(d->nresolutions == 2 && d->resolutions[1] == 600, "resolutions");
 
     static const struct {
@@ -893,6 +972,81 @@ static void test_driver(void)
         expect_clean(&s, "2 pages");
         CHECK(s.npages == 2 && s.fg_seen[1] == 1 && s.fg_seen[2] == 2 && s.fg_seen[4] == 1, "2 pages: %d pages, flags",
               s.npages);
+        sim_free(&s);
+    }
+
+    // the printer goes offline when it has nothing left to print (a slow host): the driver starts it again and
+    // counts the pages from the printer's restarted counters
+    for (int after = 1; after <= 3; after++) {
+        sim_t s;
+        sim_init(&s);
+        s.offline_after = after;
+        run_t r = run_job(d, &s, 300, 0, 1, 4, pat_rect, 0);
+        CHECK(!r.begin_rc && !r.page_rc && !r.end_rc && !r.job_rc, "offline after %d: rc %d %d %d %d", after,
+              r.begin_rc, r.page_rc, r.end_rc, r.job_rc);
+        expect_clean(&s, "offline");
+        CHECK(s.npages == 4 && s.restarts == (after < 4 ? 1 : 0), "offline after %d: %d pages, %d restarts", after,
+              s.npages, s.restarts);
+        sim_free(&s);
+    }
+
+    // out of paper: the printer says so (and "buffer full") for much longer than the buffer wait allows; the job
+    // waits for paper and goes on, the platform sees "Out of paper" meanwhile and not afterwards
+    {
+        sim_t s;
+        sim_init(&s);
+        s.full_polls = 200;
+        s.nopaper_polls = 200;
+        run_t r = run_job(d, &s, 300, 0, 1, 2, pat_rect, 0);
+        CHECK(!r.begin_rc && !r.page_rc && !r.end_rc && !r.job_rc, "no paper: rc %d %d %d %d", r.begin_rc, r.page_rc,
+              r.end_rc, r.job_rc);
+        expect_clean(&s, "no paper");
+        CHECK(s.npages == 2, "no paper: %d pages", s.npages);
+        CHECK(!canon_capt_paper_out(), "no paper: still reported after the job");
+        sim_free(&s);
+    }
+    // ... and without the paper bits the same buffer wait is an error after its limit
+    {
+        sim_t s;
+        sim_init(&s);
+        s.full_polls = 400;
+        run_t r = run_job(d, &s, 300, 0, 1, 2, pat_rect, 0);
+        CHECK(r.page_rc < 0 || r.job_rc < 0 || r.end_rc < 0, "buffer full for good: the job should fail");
+        sim_free(&s);
+    }
+
+    // offline because the paper is out (the same status 8E12): wait for the paper, then restart
+    {
+        sim_t s;
+        sim_init(&s);
+        s.offline_after = 2;
+        s.offline_paper = 40;
+        run_t r = run_job(d, &s, 300, 0, 1, 4, pat_rect, 0);
+        CHECK(!r.begin_rc && !r.page_rc && !r.end_rc && !r.job_rc, "offline, no paper: rc %d %d %d %d", r.begin_rc,
+              r.page_rc, r.end_rc, r.job_rc);
+        expect_clean(&s, "offline, no paper");
+        CHECK(s.npages == 4 && s.restarts == 1, "offline, no paper: %d pages, %d restarts", s.npages, s.restarts);
+        sim_free(&s);
+    }
+
+    // a job of an earlier session still open: the printer refuses a new one until that one is ended
+    {
+        sim_t s;
+        sim_init(&s);
+        s.stale_job = 5;
+        run_t r = run_job(d, &s, 300, 0, 1, 2, pat_rect, 0);
+        CHECK(!r.begin_rc && !r.page_rc && !r.end_rc && !r.job_rc, "stale job: rc %d %d %d %d", r.begin_rc, r.page_rc,
+              r.end_rc, r.job_rc);
+        expect_clean(&s, "stale job");
+        CHECK(s.npages == 2 && s.stale_job == 0, "stale job: %d pages, job %u", s.npages, s.stale_job);
+        sim_free(&s);
+    }
+    {
+        sim_t s;
+        sim_init(&s);
+        s.stale_job = 900;      // not one the driver can guess: the job fails and says so
+        run_t r = run_job(d, &s, 300, 0, 1, 1, pat_rect, 0);
+        CHECK(r.begin_rc < 0 || r.page_rc < 0 || r.job_rc < 0 || r.end_rc < 0, "refused for good: the job should fail");
         sim_free(&s);
     }
 

@@ -7,18 +7,16 @@
   import Viewer from './components/Viewer.svelte';
   import FilePicker from './components/FilePicker.svelte';
   import PrinterView from './views/PrinterView.svelte';
-  import ScannerView from './views/ScannerView.svelte';
   import FilesView from './views/FilesView.svelte';
   import ProcessView from './views/ProcessView.svelte';
   import { connect, device } from './lib/device.svelte';
   import { loadFiles } from './lib/files.svelte';
   import { loadWork } from './lib/process.svelte';
-  import { initScanSync } from './lib/scan.svelte';
   import { ui } from './lib/ui.svelte';
 
-  const ROUTES = ['printer', 'scanner', 'files', 'process'] as const;
+  const ROUTES = ['printer', 'files', 'process'] as const;
   type Route = (typeof ROUTES)[number];
-  const TITLES: Record<Route, string> = { printer: 'Printer', scanner: 'Scanner', files: 'Files', process: 'Process' };
+  const TITLES: Record<Route, string> = { printer: 'Printer', files: 'Files', process: 'Process' };
 
   let hash = $state(location.hash);
   let narrow = $state(false);
@@ -36,7 +34,6 @@
     mq.addEventListener('change', (e) => (narrow = e.matches));
     const onHash = () => (hash = location.hash);
     addEventListener('hashchange', onHash);
-    initScanSync();
     connect();
     loadFiles();
     loadWork();
@@ -62,8 +59,6 @@
       <div class="content">
         {#if current === 'printer'}
           <PrinterView />
-        {:else if current === 'scanner'}
-          <ScannerView />
         {:else if current === 'files'}
           <FilesView />
         {:else}
